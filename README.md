@@ -111,7 +111,7 @@ Model output is never trusted on its own: `server/verify.ts` (findings), `server
 
 ## API and webhooks
 
-Another system (a property-management tool, a camera, a script) can send inspection photos and get the results back as JSON. Open a scene, then **More actions → API & webhook** to see its token, set a webhook URL and copy the signing secret. Each scene has its own token, and it opens only that scene.
+Another system (a property-management tool, a camera, a script) can send inspection photos and get the results back as JSON. Open a scene, then click **API & webhook** at the top to see its token, set a webhook URL and copy the signing secret. Each scene has its own token, and it opens only that scene.
 
 Send a photo (JPEG, PNG or WebP, up to 15 MB):
 

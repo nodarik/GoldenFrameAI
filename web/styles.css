@@ -121,7 +121,7 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; margin-bottom: 20px; box-shadow: var(--shadow); }
 .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 .panel-head p { margin: 0; }
-.collapse-btn { flex: none; margin-top: 2px; font-size: 18px; padding: 4px 10px; border-color: var(--border-strong); }
+.collapse-btn { flex: none; margin-top: 2px; padding: 2px; border-color: transparent; }
 .panel.collapsed .panel-head { margin-bottom: 0; }
 .drop { text-align: center; padding: 48px 20px; border: 2px dashed var(--border-strong); background: transparent; box-shadow: none; }
 .drop p { max-width: 460px; margin: 6px auto 16px; }
@@ -226,7 +226,16 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 .section-head {
   width: 100%; display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 0; border-radius: 0;
   background: var(--surface-2); font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
+  cursor: pointer; text-align: left;
 }
+button.section-head:hover { background: var(--surface-3); }
+.toggle {
+  display: grid; place-items: center; width: 24px; height: 24px; flex: none;
+  border: 1.5px solid var(--accent); border-radius: 7px; background: var(--surface); color: var(--accent);
+  font-size: 16px; font-weight: 700; line-height: 1;
+}
+button:hover > .toggle, button.section-head:hover .toggle { background: var(--accent); color: var(--on-accent); }
+.collapse-btn .toggle { width: 26px; height: 26px; font-size: 17px; }
 .section-head .dot { --c: var(--ok); }
 .section-head .count { font-family: var(--display); letter-spacing: 0; padding: 1px 9px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
 .section-card.complete .section-head .count { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: var(--ok-bg); }

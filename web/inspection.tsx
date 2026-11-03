@@ -199,6 +199,7 @@ function Section({ name, count, complete, collapsed, hint, children }: {
   return (
     <div className={`section-card${complete ? " complete" : ""}`}>
       <button className="section-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="toggle" aria-hidden="true">{open ? "−" : "+"}</span>
         <span className="dot" /> {name} <span className="count">{count}</span>
       </button>
       {open && hint && <p className="muted small row-pad">{hint}</p>}

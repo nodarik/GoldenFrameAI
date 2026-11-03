@@ -30,11 +30,9 @@ export function ScenePage({ id, checkId, groups, onScenesChange }: { id: string;
         </div>
         <div className="row">
           {scene.golden && <NewPhotoButton sceneId={id} primary onError={setError} />}
+          <button onClick={() => setDialog("integration")}>API & webhook</button>
           <button onClick={() => setDialog("edit")}>Edit</button>
-          <Menu label="More actions" items={[
-            { label: "API & webhook", run: () => setDialog("integration") },
-            { label: "Delete scene", run: () => setDialog("delete"), danger: true },
-          ]} />
+          <Menu label="More actions" items={[{ label: "Delete scene", run: () => setDialog("delete"), danger: true }]} />
         </div>
       </header>
       {error && <div className="banner error" role="alert">{error} <button className="ghost" onClick={() => setError("")}>Dismiss</button></div>}
@@ -120,7 +118,7 @@ function CollapseButton({ collapsed, onToggle, label }: { collapsed: boolean; on
   return (
     <button type="button" className="icon collapse-btn" onClick={onToggle} aria-expanded={!collapsed}
       aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`} title={collapsed ? `Expand ${label}` : `Collapse ${label}`}>
-      {collapsed ? "▸" : "▾"}
+      <span className="toggle" aria-hidden="true">{collapsed ? "+" : "−"}</span>
     </button>
   );
 }
@@ -332,6 +330,14 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
   const [newSection, setNewSection] = useState("");
   const [drafting, setDrafting] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [closed, setClosed] = useState<Set<string>>(() => new Set());
+  const toggle = (name: string) =>
+    setClosed((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
 
   const save = async (next: { id?: string; text: string; section: string }[]) => {
     try {
@@ -352,6 +358,13 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
       setDraft("");
       setNewSection("");
       setSection(target.toUpperCase());
+      // New rule's section should be visible.
+      setClosed((prev) => {
+        if (!prev.has(target.toUpperCase())) return prev;
+        const next = new Set(prev);
+        next.delete(target.toUpperCase());
+        return next;
+      });
     }
   };
   const wonder = async () => {
@@ -359,6 +372,7 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
     try {
       const r = await post<{ checklist: Rule[] }>(`/api/scenes/${scene.id}/checklist/draft`, {});
       onSaved(r.checklist);
+      setClosed(new Set());
     } catch (err) {
       onError((err as Error).message);
     } finally {
@@ -379,16 +393,30 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
       {!collapsed && (
       <>
       {rules.length === 0 && <p className="muted small">No rules yet. Draft a starter checklist from the golden photo, or write your own below.</p>}
+      {sections.length > 1 && (
+        <div className="row end" style={{ margin: "0 0 8px" }}>
+          <button type="button" className="link small" onClick={() => setClosed(new Set())}>Expand all</button>
+          <button type="button" className="link small" onClick={() => setClosed(new Set(sections))}>Collapse all</button>
+        </div>
+      )}
       <div className="sections">
-        {sections.map((name) => (
-          <div key={name} className="section-card">
-            <div className="section-head"><span className="dot" /> {name} <span className="count">{rules.filter((r) => r.section === name).length}</span></div>
-            {rules.filter((r) => r.section === name).map((r) => (
-              <RuleEditor key={r.id} rule={r} onSave={(text) => save(rules.map((x) => (x.id === r.id ? { ...x, text } : x)))}
-                onDelete={() => save(rules.filter((x) => x.id !== r.id))} />
-            ))}
-          </div>
-        ))}
+        {sections.map((name) => {
+          const open = !closed.has(name);
+          const list = rules.filter((r) => r.section === name);
+          return (
+            <div key={name} className="section-card">
+              <button type="button" className="section-head" onClick={() => toggle(name)} aria-expanded={open}
+                aria-label={`${open ? "Collapse" : "Expand"} section ${name}`}>
+                <span className="toggle" aria-hidden="true">{open ? "−" : "+"}</span>
+                <span className="dot" /> {name} <span className="count">{list.length}</span>
+              </button>
+              {open && list.map((r) => (
+                <RuleEditor key={r.id} rule={r} onSave={(text) => save(rules.map((x) => (x.id === r.id ? { ...x, text } : x)))}
+                  onDelete={() => save(rules.filter((x) => x.id !== r.id))} />
+              ))}
+            </div>
+          );
+        })}
       </div>
       <form className="add-rule" onSubmit={add}>
         <input type="text" value={draft} maxLength={200} placeholder="Duvet is smooth and centred on the bed" aria-label="New rule" onChange={(e) => setDraft(e.target.value)} />
