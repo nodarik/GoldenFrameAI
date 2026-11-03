@@ -8,6 +8,7 @@ export default defineConfig({
   server: {
     port: 5173,
     // Must match API_PORT (server/env.ts). 8787 is taken by another local tool.
-    proxy: { "/api": "http://127.0.0.1:8791", "/media": "http://127.0.0.1:8791" },
+    // Trailing slashes: "/api" alone would also catch web/api.ts.
+    proxy: { "/api/": "http://127.0.0.1:8791", "/media/": "http://127.0.0.1:8791" },
   },
 });

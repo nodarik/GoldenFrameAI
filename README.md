@@ -2,26 +2,39 @@
 
 Give any photo or camera a standard. Get events.
 
-GoldenFrame checks whether a place looks the way it should. You photograph an area once in its correct state (the **golden photo**), tag the objects that matter, and from then on every new photo or walkthrough video is compared with it. Differences become findings, and confirmed findings become events.
+GoldenFrame checks whether a place looks the way it should. You photograph a **scene** once in its correct state (the **golden photo**), GoldenFrame finds the objects that matter, and from then on every new photo or walkthrough video is compared with it. Differences become findings, a person reviews each inspection, and confirmed findings become events.
 
-Built for hotel rooms, restaurants and other business spaces, on Meta's models: **SAM 3.1** for finding and counting objects, **Muse Spark** for comparing photos and judging checklists.
+Built for hotel rooms, restaurants and other business spaces, on Meta's models: **SAM 3.1** for finding and counting objects, **Muse Spark** for comparing photos and checking checklists, and **Muse Wonder** for second opinions, checklist drafts and inspection summaries.
 
 ## Features
 
-### Photo checks
-- **Golden photo per area.** Upload a photo of the area in its correct state.
-- **Tap to make a rule.** Tap an object (a pillow, a lamp). SAM outlines it, Spark names it, and GoldenFrame counts every matching object, so "2 pillows" becomes a rule.
-- **Check a new photo.** Spark compares the new photo with the golden one (missing, moved, new, untidy, dirty or damaged things) while SAM recounts every tagged item.
-- **Plain rules decide, not the models.** SAM counts are the source of truth for tagged items. Spark-only judgement calls go to a person to confirm or reject. Wrong-view photos are flagged as "retake".
+### Scenes board
+- **Kanban by next step.** Columns: Not set up, Ready (no inspection yet), Needs review, Issues (reviewed, something to fix or retake), Reviewed.
+- **Groups and assignees.** Give each scene a group (a location, floor or client) and the person responsible. Groups appear in the sidebar as filters.
+- **Edit and delete** any scene from its card menu or its page.
 
-### Video inspections
-- **Written checklists.** Per area, write what must be true: "TV is on and shows the welcome screen", "Left-wall artwork is straight".
-- **Upload a walkthrough video.** GoldenFrame takes a frame every second, picks the best frame for each area, then runs the photo check and the checklist on it.
-- **Report.** One section per area: the matched frame next to the golden photo with outlines, the checklist (✓ pass, ✕ fail, ? needs review), findings, and a button that jumps the video to that moment. Areas missing from the video are marked "Not seen".
+### Scene page
+- **Golden photo with everything detected.** On upload, Spark lists the objects worth watching and SAM outlines and counts each kind. Remove what doesn't matter; click any other object to add it.
+- **Hover to see what we watch.** Hovering an outline spotlights it with its name and count; the matching row in "What we watch" lights up, and the other way round.
+- **Checklist in sections.** Write what must be true ("THE BED: Duvet is smooth and centred"), or let Muse Wonder draft a starter checklist from the golden photo.
+- **Inspections.** Every photo and walkthrough frame for the scene in one list. Each opens a checklist view: watched objects, rules by section, differences from golden, with x/y counts.
+
+### Checks
+- **Spark compares, SAM counts, Spark checks the checklist**, all in parallel.
+- **Framing.** Watched objects found in both photos measure the zoom and shift between them (score 0-100). Slightly off: still compared, the camera shift doesn't count as "moved", and anything outside the golden photo's view is set aside instead of reported as new. Too far off: "Retake" with a hint such as "Turn a little right".
+- **Plain rules decide, not the models.** SAM counts are the source of truth for watched objects. Spark-only judgement calls go to a person.
+- **Muse Wonder second opinion.** Before a point reaches a person, Wonder looks again; what it finds clearly fine is dismissed (a person can overturn that), the rest carries Wonder's note. Wonder also writes a short summary of each inspection.
+
+### Review
+- **Needs review / Reviewed per inspection.** Clean passes are reviewed automatically. Reviewed unlocks once every flagged point is confirmed or rejected; any decision and the status can be changed later.
+- **Notes and history.** Every decision, status change and note is kept with who and when (the reviewer's name is remembered in the browser; there are no accounts).
+
+### Walkthroughs (video)
+- **Upload a walkthrough video** covering several scenes. GoldenFrame takes a frame every second, picks the best frame for each scene, then runs the check on it. Each becomes an inspection on that scene's page; scenes missing from the video are marked "Not seen".
 
 ### Everywhere
 - Live progress in the browser.
-- A run log of every model call with time and cost, and a daily spending cap.
+- A model activity page with every model call, its time and cost, and a daily spending cap.
 - Optional access code to protect a public deployment.
 
 ## Requirements
@@ -61,7 +74,7 @@ All settings are environment variables, read from `.env`:
 | `MODEL_API_KEY` | (required) | Meta model API key |
 | `META_BASE_URL` | `https://api.meta.ai/v1` | Model API base URL |
 | `SPARK_MODEL` | `muse-spark-1.3` | Model for photo comparison and checklists |
-| `WONDER_MODEL` | `muse-wonder-1.0` | Larger model, reserved for later use |
+| `WONDER_MODEL` | `muse-wonder-1.0` | Model for second opinions, checklist drafts and inspection summaries |
 | `SAM_MODEL` | `sam-3.1` | Segmentation model |
 | `ACCESS_CODE` | empty | Code required to use the app. Empty means no login: fine locally, never on a public URL |
 | `API_PORT` | `8791` | API port (must match the proxy in `vite.config.ts`) |
@@ -84,16 +97,17 @@ To run it as one server: `npm run build`, then `npm start`, then open `http://lo
 ## How it works
 
 ```
-Photo check
-  new photo ──► Spark: same view? what differs?  ─┐
-            └─► SAM: count each tagged item      ─┴─► verify.ts decides ─► findings ─► events
+Check
+  new photo ──► Spark: same view? framing? what differs? ─┐
+            ├─► SAM: count each watched object           ─┼─► align.ts framing ─► verify.ts decides
+            └─► Spark: checklist rules                   ─┘        ─► Wonder: second opinion + summary ─► person reviews ─► events
 
 Video inspection
   video ─► ffmpeg (1 frame/s) ─► contact sheet ─► Spark picks a frame per area
-        ─► photo check on that frame + Spark checklist (SAM outlines failures) ─► report
+        ─► the same check on that frame ─► an inspection on each scene
 ```
 
-Model output is never trusted on its own: `server/verify.ts` (photo) and `server/video/rules.ts` (checklists) turn it into confirmed, needs-review or dropped results with a reason for each.
+Model output is never trusted on its own: `server/verify.ts` (findings), `server/checklist.ts` (rules) and `server/align.ts` (framing) turn it into confirmed, needs-review or dropped results with a reason for each.
 
 ## Project layout
 
@@ -101,17 +115,24 @@ Model output is never trusted on its own: `server/verify.ts` (photo) and `server
 server/
   index.ts        HTTP API and media routes (Hono)
   db.ts           SQLite schema
-  meta.ts         Model calls (SAM, Spark), prompts, cost logging
-  golden.ts       Photo check pipeline
-  verify.ts       Decision rules for photo findings
-  setup.ts        Tap-to-make-a-rule
+  meta.ts         Model calls (SAM, Spark, Wonder), prompts, cost logging
+  golden.ts       Check pipeline, second opinion, summary, review decisions
+  verify.ts       Decision rules for findings
+  align.ts        Framing score and "outside the golden view"
+  checklist.ts    Checklist in sections and its decision rules
+  setup.ts        Auto-detect and tap-to-add watched objects
   images.ts       Image normalising and box maths (sharp)
   runlog.ts       Run log, live update bus, spending cap
-  video/          Video inspections: tables, frames, pipeline, checklist rules, routes
+  video/          Walkthroughs: tables, frames, pipeline, routes
 web/
-  main.tsx        Photo checks UI
-  video.tsx       Video inspections UI
-  styles.css      Shared styles (light and dark)
+  main.tsx        App shell, sidebar, routing, model activity
+  board.tsx       Scenes board and scene dialogs
+  scene.tsx       Scene page: golden photo, checklist, inspections
+  inspection.tsx  One inspection: checklist view, framing, review
+  photo.tsx       Photo with hoverable outlines
+  video.tsx       Walkthroughs
+  api.ts          API types and helpers
+  styles.css      Styles (light and dark)
 scripts/spike.ts  Model experiments
 ```
 

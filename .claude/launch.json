@@ -5,6 +5,7 @@
       "name": "goldenframe",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
+      "env": { "API_PORT": "8791" },
       "port": 5173
     }
   ]
