@@ -1,170 +1,151 @@
-# GoldenFrame
+# 🖼️ GoldenFrame
 
-Give any photo or camera a standard. Get events.
+> Give any photo or camera a standard. Get events.
 
-GoldenFrame checks whether a place looks the way it should. You photograph a **scene** once in its correct state (the **golden photo**), GoldenFrame finds the objects that matter, and from then on every new photo or walkthrough video is compared with it. Differences become findings, a person reviews each inspection, and confirmed findings become events.
+**GoldenFrame checks whether a place looks the way it should.**
+Photograph a scene once when it's perfect — the **golden photo** — and every new photo or walkthrough video is compared against it. Differences become findings, a person reviews each inspection, confirmed findings become events.
 
-Built for hotel rooms, restaurants and other business spaces, on Meta's models: **SAM 3.1** for finding and counting objects, **Muse Spark** for comparing photos and checking checklists, and **Muse Wonder** for second opinions, checklist drafts and inspection summaries.
+Built for **hotel rooms, restaurants, and business spaces**. Powered by Meta models: **SAM 3.1** (find + count), **Muse Spark** (compare + checklist), **Muse Wonder** (second opinion + summaries).
 
-## Features
+![Node](https://img.shields.io/badge/node-22.5+-green) ![React](https://img.shields.io/badge/react-19-blue) ![SQLite](https://img.shields.io/badge/sqlite-local-lightgrey) ![License: MIT](https://img.shields.io/badge/license-MIT-yellow)
 
-### Scenes board
-- **Kanban by next step.** Columns: Not set up, Ready (no inspection yet), Needs review, Issues (reviewed, something to fix or retake), Reviewed.
-- **Groups and assignees.** Give each scene a group (a location, floor or client) and the person responsible. Groups appear in the sidebar as filters.
-- **Edit and delete** any scene from its card menu or its page.
+---
 
-### Scene page
-- **Golden photo with everything detected.** On upload, Spark lists the objects worth watching and SAM outlines and counts each kind. Remove what doesn't matter; click any other object to add it.
-- **Hover to see what we watch.** Hovering an outline spotlights it with its name and count; the matching row in "What we watch" lights up, and the other way round.
-- **Checklist in sections.** Write what must be true ("THE BED: Duvet is smooth and centred"), or let Muse Wonder draft a starter checklist from the golden photo.
-- **Inspections.** Every photo and walkthrough frame for the scene in one list. Each opens a checklist view: watched objects, rules by section, differences from golden, with x/y counts.
+## How it looks
 
-### Checks
-- **Spark compares, SAM counts, Spark checks the checklist**, all in parallel.
-- **Framing.** Watched objects found in both photos measure the zoom and shift between them (score 0-100). Slightly off: still compared, the camera shift doesn't count as "moved", and anything outside the golden photo's view is set aside instead of reported as new. Too far off: "Retake" with a hint such as "Turn a little right".
-- **Plain rules decide, not the models.** SAM counts are the source of truth for watched objects. Spark-only judgement calls go to a person.
-- **Muse Wonder second opinion.** Before a point reaches a person, Wonder looks again; what it finds clearly fine is dismissed (a person can overturn that), the rest carries Wonder's note. Wonder also writes a short summary of each inspection.
+> Add 3 screenshots to `docs/screenshots/` — they sell the whole thing.
 
-### Review
-- **Needs review / Reviewed per inspection.** Clean passes are reviewed automatically. Reviewed unlocks once every flagged point is confirmed or rejected; any decision and the status can be changed later.
-- **Notes and history.** Every decision, status change and note is kept with who and when (the reviewer's name is remembered in the browser; there are no accounts).
+| Board | Scene | Inspection |
+|---|---|---|
+| ![board](docs/screenshots/board.png) | ![scene](docs/screenshots/scene.png) | ![inspection](docs/screenshots/inspection.png) |
+| Kanban by next step | Golden photo + checklist + inspections | Golden vs. new, framing, review |
 
-### Walkthroughs (video)
-- **Upload a walkthrough video** covering several scenes. GoldenFrame takes a frame every second, picks the best frame for each scene, then runs the check on it. Each becomes an inspection on that scene's page; scenes missing from the video are marked "Not seen".
+## How it works in 60 seconds
 
-### Everywhere
-- Live progress in the browser.
-- A model activity page with every model call, its time and cost, and a daily spending cap.
-- Optional access code to protect a public deployment.
+1. **Add a scene** — e.g. `Room 1201 – bed`, group `Floor 12`, assignee `Maria`
+2. **Upload the golden photo** — Spark lists objects, SAM outlines + counts them. Click anything else to add it. Write rules or `✦ Draft with Muse Wonder`
+3. **Inspect** — `+ New inspection` (photo) or upload a walkthrough video. Get `All good / Issues / Needs review / Retake` + Wonder summary
+4. **Review** — confirm or dismiss each flag, add a note, mark Reviewed. Done.
 
-## Requirements
+## ✨ Features
 
-- Node.js 22.5 or newer (uses the built-in `node:sqlite`)
-- [ffmpeg](https://ffmpeg.org/) on your `PATH`, for video inspections (`brew install ffmpeg` on macOS)
-- An API key for the Meta model API
+**Scenes board**
+- Kanban: `Not set up → Ready → Needs review → Issues → Reviewed` with live counts
+- Groups (location / floor / client) + assignees with autocomplete, sidebar filters
+- Inspection counts on every card: `5 inspections · 1 to review`
 
-## Getting started
+**Scene page**
+- Golden photo with upload progress bar, auto-detect, tap-to-add, hover spotlight
+- Checklist in collapsible sections (`THE BED: Duvet is smooth…`)
+- Inspections list with photo / video source, review pills, one-click delete
+
+**Checks you can trust**
+- Spark compares + checks rules, SAM counts — in parallel
+- Framing score 0–100: `aligned / slightly_off / far_off` with retake hints (`Turn a little right`)
+- Rules decide, not vibes: SAM counts are truth for objects, Spark-only calls go to a person
+- Wonder second-opinion before anything reaches you + auto-dismisses clear-fine
+
+**Review & history**
+- `Needs review / Reviewed` per inspection, blocked until all flags decided
+- Notes, who/when, full history. No accounts — name remembered in browser
+
+**Walkthroughs**
+- One video → 1 frame/sec → best frame per scene → inspection per scene. Missing scenes marked `Not seen`
+
+**Ops built-in**
+- Live SSE progress, Model activity page with per-call time + cost + daily cap
+- Optional `ACCESS_CODE`, single-server deploy (`npm run build + npm start`), Fly.io ready
+
+## 🚀 Quickstart
+
+Requirements: Node 22.5+, `ffmpeg` on PATH (`brew install ffmpeg`), Meta API key.
 
 ```bash
 git clone https://github.com/nodarik/GoldenFrameAI.git
 cd GoldenFrameAI
 npm install
-```
-
-Create a `.env` file in the project root:
-
-```bash
-MODEL_API_KEY=your-meta-api-key
-```
-
-Start the API and the web app together:
-
-```bash
+echo "MODEL_API_KEY=your-meta-api-key" > .env
 npm run dev
 ```
 
-Open http://localhost:5173. The API runs on port 8791 and the web app proxies `/api` and `/media` to it.
+Open http://localhost:5173 (API on :8791, proxied).
 
-### Configuration
+## ⚙️ Configuration
 
-All settings are environment variables, read from `.env`:
-
-| Variable | Default | What it does |
+| Variable | Default | What |
 |---|---|---|
-| `MODEL_API_KEY` | (required) | Meta model API key |
-| `META_BASE_URL` | `https://api.meta.ai/v1` | Model API base URL |
-| `SPARK_MODEL` | `muse-spark-1.3` | Model for photo comparison and checklists |
-| `WONDER_MODEL` | `muse-wonder-1.0` | Model for second opinions, checklist drafts and inspection summaries |
-| `SAM_MODEL` | `sam-3.1` | Segmentation model |
-| `ACCESS_CODE` | empty | Code required to use the app. Empty means no login: fine locally, never on a public URL |
-| `API_PORT` | `8791` | API port (must match the proxy in `vite.config.ts`) |
-| `DATA_DIR` | `./data` | Where the SQLite database, photos and videos are stored |
-| `DAILY_SPEND_LIMIT_USD` | `10` | Model calls stop for the day once this is reached |
-| `FFMPEG_PATH` | `ffmpeg` | Path to the ffmpeg binary |
+| `MODEL_API_KEY` | required | Meta model API key |
+| `SPARK_MODEL` / `WONDER_MODEL` / `SAM_MODEL` | `muse-spark-1.3` / `muse-wonder-1.0` / `sam-3.1` | Model pins |
+| `ACCESS_CODE` | empty | Gate public deploys. Empty = no login (local only) |
+| `DATA_DIR` | `./data` | SQLite + photos + videos + frames (git-ignored, EXIF stripped) |
+| `DAILY_SPEND_LIMIT_USD` | `10` | Hard stop for model calls |
+| `API_PORT` / `FFMPEG_PATH` | `8791` / `ffmpeg` | Ports / binary |
 
-## Scripts
+<details>
+<summary>All scripts</summary>
 
-| Command | What it does |
+| Command | What |
 |---|---|
-| `npm run dev` | API (auto-restarts on changes) and web app with hot reload |
-| `npm run build` | Build the web app into `dist/web` |
-| `npm start` | Run the API, which also serves `dist/web` if it exists |
-| `npm run typecheck` | Type-check server and web code |
-| `npm run spike` | Day-1 experiment script against the models (`scripts/spike.ts`) |
+| `npm run dev` | API (watch) + web (HMR) |
+| `npm run build` / `npm start` | Build web to `dist/web` / serve it from API (`http://localhost:8791`) |
+| `npm run typecheck` / `npm run spike` | `tsc --noEmit` / model experiments |
 
-To run it as one server: `npm run build`, then `npm start`, then open `http://localhost:8791`.
+</details>
 
-## How it works
+## 🧠 Pipeline
 
+```mermaid
+flowchart LR
+  NewPhoto --> Spark[ Spark: same view? framing? diffs? ]
+  NewPhoto --> SAM[ SAM: count watched objects ]
+  NewPhoto --> Rules[ Spark: checklist rules ]
+  Spark --> Align[ align.ts: framing score ]
+  SAM --> Align
+  Align --> Verify[ verify.ts + checklist.ts: confirm / needs_review / drop ]
+  Verify --> Wonder[ Wonder: second opinion + summary ]
+  Wonder --> Person[ Person reviews → events ]
 ```
-Check
-  new photo ──► Spark: same view? framing? what differs? ─┐
-            ├─► SAM: count each watched object           ─┼─► align.ts framing ─► verify.ts decides
-            └─► Spark: checklist rules                   ─┘        ─► Wonder: second opinion + summary ─► person reviews ─► events
 
-Video inspection
-  video ─► ffmpeg (1 frame/s) ─► contact sheet ─► Spark picks a frame per area
-        ─► the same check on that frame ─► an inspection on each scene
-```
+> `server/verify.ts`, `checklist.ts`, `align.ts` turn model output into decisions with a reason each. Models never auto-confirm issues.
 
-Model output is never trusted on its own: `server/verify.ts` (findings), `server/checklist.ts` (rules) and `server/align.ts` (framing) turn it into confirmed, needs-review or dropped results with a reason for each.
+## 🔌 API & webhooks
 
-## API and webhooks
-
-Another system (a property-management tool, a camera, a script) can send inspection photos and get the results back as JSON. Open a scene, then click **API & webhook** at the top to see its token, set a webhook URL and copy the signing secret. Each scene has its own token, and it opens only that scene.
-
-Send a photo (JPEG, PNG or WebP, up to 15 MB):
+Per-scene token: Scene → **API & webhook**. Send a photo, get a check, receive `check.finished`:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" -F image=@photo.jpg https://your-app.example/api/ingest/$SCENE_ID
+curl -H "Authorization: Bearer $TOKEN" -F image=@photo.jpg \
+  https://your-app.example/api/ingest/$SCENE_ID
 # 202 {"checkId":"chk_…","snapshotId":"snp_…"}
 ```
 
-The check runs exactly like an upload in the app and appears there for review. Inspections are listed by when the photo was taken (its EXIF date, else when it arrived), so photos can be sent in any order. When it finishes, GoldenFrame POSTs to the webhook URL:
+Verify: HMAC-SHA256 body with webhook secret == `X-GoldenFrame-Signature`.
+
+<details>
+<summary>Payload + fetch example</summary>
 
 ```json
-{ "event": "check.finished", "check": { "id": "chk_…", "sceneId": "scn_…", "status": "issues", "score": { "ok": 4, "total": 5 }, "result": { "findings": [], "checklist": [], "summary": "…" } } }
+{ "event": "check.finished", "check": { "id": "chk_…", "sceneId": "scn_…", "status": "issues", "score": { "ok": 4, "total": 5 } } }
 ```
-
-`status` is `ok`, `issues`, `needs_review`, `retake` or `failed`. Verify a delivery by computing HMAC-SHA256 of the raw body with the signing secret and comparing it with the `X-GoldenFrame-Signature: sha256=<hex>` header. Deliveries are tried once, so a receiver that was down can fetch the result instead:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" https://your-app.example/api/ingest/$SCENE_ID/checks/$CHECK_ID
+curl -H "Authorization: Bearer $TOKEN" \
+  https://your-app.example/api/ingest/$SCENE_ID/checks/$CHECK_ID
 ```
 
-Webhook URLs must use https and may not point at private addresses. Outside production (`NODE_ENV` other than `production`, as in `npm run dev`) http and localhost are allowed too. Photo URLs in the JSON need an app login.
+</details>
 
-## Project layout
+## 📁 Project layout
 
 ```
-server/
-  index.ts        HTTP API and media routes (Hono)
-  db.ts           SQLite schema
-  meta.ts         Model calls (SAM, Spark, Wonder), prompts, cost logging
-  golden.ts       Check pipeline, second opinion, summary, review decisions
-  verify.ts       Decision rules for findings
-  align.ts        Framing score and "outside the golden view"
-  checklist.ts    Checklist in sections and its decision rules
-  setup.ts        Auto-detect and tap-to-add watched objects
-  images.ts       Image normalising and box maths (sharp)
-  runlog.ts       Run log, live update bus, spending cap
-  video/          Walkthroughs: tables, frames, pipeline, routes
-web/
-  main.tsx        App shell, sidebar, routing, model activity
-  board.tsx       Scenes board and scene dialogs
-  scene.tsx       Scene page: golden photo, checklist, inspections
-  inspection.tsx  One inspection: checklist view, framing, review
-  photo.tsx       Photo with hoverable outlines
-  video.tsx       Walkthroughs
-  api.ts          API types and helpers
-  styles.css      Styles (light and dark)
-scripts/spike.ts  Model experiments
+server/ index.ts db.ts meta.ts golden.ts verify.ts align.ts checklist.ts setup.ts images.ts runlog.ts video/
+web/ main.tsx board.tsx scene.tsx inspection.tsx photo.tsx video.tsx api.ts styles.css
+scripts/spike.ts  fly.toml  vite.config.ts
 ```
 
-## Data and privacy
+## Privacy
 
-Everything is stored locally in `DATA_DIR`: the SQLite database, golden photos, check photos, uploaded videos and extracted frames. Uploaded photos are re-encoded, which strips metadata such as GPS location. `data/` and `.env` are git-ignored.
+Local-first: everything in `DATA_DIR`. Re-encoded uploads strip GPS. `data/` + `.env` ignored.
 
 ## License
 
-MIT, as declared in `package.json`.
+MIT
