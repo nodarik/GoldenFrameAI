@@ -1,0 +1,8 @@
+node_modules/
+dist/
+data/
+.git/
+.gitignore
+spike/out/
+.env
+npm-debug.log
