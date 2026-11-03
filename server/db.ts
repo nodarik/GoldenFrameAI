@@ -88,6 +88,8 @@ const addColumn = (table: string, column: string, type: string) => {
 addColumn("scenes", "group_name", "TEXT");
 addColumn("scenes", "assignee", "TEXT");
 addColumn("items", "masks_json", "TEXT");
+// Spots on the golden photo where a person deleted one of an item's boxes: matches there aren't counted.
+addColumn("items", "ignored_json", "TEXT");
 if (!columnsOf("checks").includes("review_status")) {
   db.exec(`
 ALTER TABLE checks ADD COLUMN review_status TEXT NOT NULL DEFAULT 'needs_review';
@@ -102,18 +104,37 @@ CREATE TABLE IF NOT EXISTS check_reviews (
 );
 CREATE INDEX IF NOT EXISTS check_reviews_check ON check_reviews(check_id, id);
 `);
+// What a check said before it was checked again, kept with that history entry.
+addColumn("check_reviews", "result_json", "TEXT");
+
+// Setup version: goes up whenever what a check compares against changes (golden photo, watched items; the checklist's
+// trigger is in checklist.ts). Each check records the version it ran against, so an older one can say it's outdated.
+// Triggers, so no route can forget it. Renaming an item doesn't change any result, so it doesn't count.
+addColumn("scenes", "setup_version", "INT NOT NULL DEFAULT 0");
+addColumn("checks", "setup_version", "INT NOT NULL DEFAULT 0");
+const bumpSetup = (id: string) => `UPDATE scenes SET setup_version = setup_version + 1 WHERE id = ${id};`;
+db.exec(`
+CREATE TRIGGER IF NOT EXISTS setup_golden AFTER UPDATE OF golden_path ON scenes
+  WHEN OLD.golden_path IS NOT NEW.golden_path BEGIN ${bumpSetup("NEW.id")} END;
+CREATE TRIGGER IF NOT EXISTS setup_item_added AFTER INSERT ON items BEGIN ${bumpSetup("NEW.scene_id")} END;
+CREATE TRIGGER IF NOT EXISTS setup_item_removed AFTER DELETE ON items BEGIN ${bumpSetup("OLD.scene_id")} END;
+CREATE TRIGGER IF NOT EXISTS setup_item_changed AFTER UPDATE ON items
+  WHEN OLD.phrase IS NOT NEW.phrase OR OLD.expected_count IS NOT NEW.expected_count OR OLD.boxes_json IS NOT NEW.boxes_json
+    OR OLD.ignored_json IS NOT NEW.ignored_json OR OLD.position_matters IS NOT NEW.position_matters
+  BEGIN ${bumpSetup("NEW.scene_id")} END;
+`);
 
 export type SceneRow = {
   id: string; name: string; type: "golden" | "monitor"; group_name: string | null; assignee: string | null;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
   webhook_url: string | null; webhook_secret: string; ingest_token: string;
-  rules_json: string; created_at: string;
+  rules_json: string; created_at: string; setup_version: number;
 };
 
 export type ItemRow = {
   id: string; scene_id: string; name: string; phrase: string; expected_count: number;
   boxes_json: string; tap_box_json: string; mask_svg: string | null;
-  phrase_matches: number; position_matters: number; created_at: string; masks_json: string | null;
+  phrase_matches: number; position_matters: number; created_at: string; masks_json: string | null; ignored_json: string | null;
 };
 
 export type SnapshotRow = {
@@ -125,7 +146,7 @@ export type CheckRow = {
   id: string; snapshot_id: string; status: string; score_ok: number | null; score_total: number | null;
   result_json: string; overlay_path: string | null; review: string | null; cost_usd: number; created_at: string;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
-  review_status: "needs_review" | "reviewed"; reviewed_at: string | null;
+  review_status: "needs_review" | "reviewed"; reviewed_at: string | null; setup_version: number;
 };
 
 export type ReviewRow = { id: number; check_id: string; action: string; note: string | null; by: string | null; at: string };

@@ -2,12 +2,12 @@
 // inspection's checklist and review on the right), then the written checklist,
 // then the golden photo with everything we watch. Each section collapses.
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, api, ago, plural, post, uploadForm, useStream } from "./api.js";
+import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, api, ago, getReviewer, plural, post, uploadForm, useStream } from "./api.js";
 import { DeleteSceneDialog, Dialog, Menu, PersonIcon, SceneDialog } from "./board.js";
 import { InspectionDetail, ReviewPill, SourceIcon } from "./inspection.js";
 import { AnnotatedPhoto } from "./photo.js";
 
-export function ScenePage({ id, checkId, groups, onScenesChange }: { id: string; checkId: string | null; groups: string[]; onScenesChange: () => void }) {
+export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"edit" | "delete" | "integration" | null>(null);
@@ -42,7 +42,7 @@ export function ScenePage({ id, checkId, groups, onScenesChange }: { id: string;
       <GoldenPanel scene={scene} reload={load} onError={setError} />
 
       {dialog === "edit" && (
-        <SceneDialog scene={scene} groups={groups} onClose={() => setDialog(null)}
+        <SceneDialog scene={scene} groups={groups} assignees={assignees} onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); void load(); onScenesChange(); }} />
       )}
       {dialog === "delete" && (
@@ -189,9 +189,19 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
     }
   };
 
-  const update = async (item: Item, patch: Partial<Pick<Item, "name" | "phrase" | "expectedCount" | "positionMatters">>) => {
+  const update = async (item: Item, patch: Partial<Pick<Item, "name" | "phrase" | "expectedCount" | "positionMatters" | "boxes">>) => {
     try {
       await api(`/api/items/${item.id}`, { method: "PUT", body: JSON.stringify(patch) });
+      await reload();
+    } catch (err) {
+      onError((err as Error).message);
+    }
+  };
+  // Stop watching one of an item's objects; the server also stops counting matches in that spot.
+  const removeBox = async (item: Item, index: number) => {
+    if (!confirm(`Stop watching this ${item.name}? We'll expect ${item.expectedCount - 1} from now on, and ignore whatever is in that spot.`)) return;
+    try {
+      await api(`/api/items/${item.id}`, { method: "PUT", body: JSON.stringify({ removeBox: index }) });
       await reload();
     } catch (err) {
       onError((err as Error).message);
@@ -238,7 +248,7 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
         <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Golden photo" />
         <div style={{ flex: 1 }}>
           <h2>Golden photo</h2>
-          <p className="muted">How the scene must look. Hover an object to see what we watch; click empty space to add an object.</p>
+          <p className="muted">How the scene must look. Hover an object to see what we watch, click one to edit it and drag its box; click empty space to add an object.</p>
         </div>
         <div className="row">
           <button onClick={detect} disabled={!!busy || !!pending}>Find objects</button>
@@ -258,7 +268,9 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
         </div>
       )}
       <AnnotatedPhoto media={g} label="Golden photo" shapes={shapes} active={active} onActive={setActive} busyAt={pending}
-        onPick={(itemId) => setOpen(itemId)} onEmptyClick={tap} />
+        onPick={(itemId) => setOpen(itemId)} onEmptyClick={tap} editable={open}
+        onBoxChange={async (itemId, boxes) => { const item = scene.items.find((i) => i.id === itemId); if (item) await update(item, { boxes }); }}
+        onBoxDelete={(itemId, index) => { const item = scene.items.find((i) => i.id === itemId); if (item) void removeBox(item, index); }} />
 
       <div className="watch">
         <div className="watch-head">
@@ -310,6 +322,8 @@ function ItemRow({ item, colour, lit, open, onToggle, onHover, onSave, onDelete 
                 onChange={(e) => onSave({ expectedCount: Math.max(0, Math.min(50, Math.round(Number(e.target.value) || 0))) })} />
             </label>
           </div>
+          <p className="muted small">Drag the box on the photo to move it, or a corner to resize it.
+            {item.boxes.length > 1 && " Press ✕ on a box to stop watching just that one."}</p>
           <label className="check"><input type="checkbox" checked={item.positionMatters} onChange={(e) => onSave({ positionMatters: e.target.checked })} /> Must stay in the same spot</label>
           {!item.phraseMatches && <p className="warn small">"{item.phrase}" didn't find this object again. Try a simpler word, like "pillow" or "lamp".</p>}
           <button className="ghost danger" onClick={onDelete}>Stop watching</button>
@@ -462,16 +476,51 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
   // Without a selection, open the oldest inspection still waiting for review, else the newest.
   // If the URL points to an inspection that is gone (just deleted), fall through to the next one.
   const known = checks ? new Set(checks.map((c) => c.id)) : null;
-  const activeId = checkId && (!known || known.has(checkId)) ? checkId : null;
+  const [gone, setGone] = useState<string | null>(null);
+  const activeId = checkId && checkId !== gone ? checkId : null;
   const waiting = (checks ?? []).filter((c) => c.reviewStatus === "needs_review" && c.status !== "running");
   const selected = activeId ?? waiting.at(-1)?.id ?? checks?.[0]?.id ?? null;
   const count = (f: Filter) => (checks ?? []).filter((c) => f === "all" || c.reviewStatus === f).length;
+  // An inspection in the URL but not in the list was either just uploaded (the list hasn't caught up) or deleted:
+  // reload once, and only call it gone if it's still missing.
+  useEffect(() => {
+    if (!checkId || !known || known.has(checkId) || checkId === gone) return;
+    let live = true;
+    api<CheckSummary[]>(`/api/scenes/${scene.id}/checks?limit=100`).then((fresh) => {
+      if (!live) return;
+      setChecks(fresh);
+      if (!fresh.some((c) => c.id === checkId)) setGone(checkId);
+    }).catch(() => {});
+    return () => { live = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkId, checks, scene.id]);
   // Pin the default choice in the URL, so marking it reviewed doesn't jump to another inspection.
   // Also repairs the URL when it points to a deleted inspection.
   useEffect(() => {
-    if (selected && (!checkId || (known && !known.has(checkId)))) location.replace(`#/scenes/${scene.id}/i/${selected}`);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [checkId, selected, scene.id, checks]);
+    if (selected && (!checkId || checkId === gone)) location.replace(`#/scenes/${scene.id}/i/${selected}`);
+  }, [checkId, selected, scene.id, gone]);
+
+  // Inspections checked against an older setup; re-checking them all queues them like a batch of uploads.
+  const outdated = (checks ?? []).filter((c) => c.outdated);
+  const [rechecking, setRechecking] = useState(false);
+  const recheckOutdated = async () => {
+    const done = (checks ?? []).filter((c) => c.status !== "running" && c.costUsd > 0);
+    const each = done.length ? done.reduce((n, c) => n + c.costUsd, 0) / done.length : 0;
+    const reviewed = outdated.filter((c) => c.reviewStatus === "reviewed").length;
+    if (!confirm(`Check ${plural(outdated.length, "inspection")} again with the current golden photo, items and checklist?` +
+      (each ? ` About $${(each * outdated.length).toFixed(2)}.` : "") +
+      (reviewed ? ` ${reviewed} reviewed will need review again; their current results stay in the history.` : ""))) return;
+    setRechecking(true);
+    onError("");
+    try {
+      await post(`/api/scenes/${scene.id}/recheck`, { by: getReviewer() || undefined });
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setRechecking(false);
+      void load();
+    }
+  };
 
   const nextAfter = (excludeId: string, list: CheckSummary[] | null) => {
     const rest = (list ?? []).filter((c) => c.id !== excludeId);
@@ -511,7 +560,10 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
           <h2>Inspections</h2>
           <p className="muted">Every photo and walkthrough frame checked against the golden photo. A person marks each one reviewed.</p>
         </div>
-        <NewPhotoButton sceneId={scene.id} onError={onError} />
+        <div className="row">
+          {outdated.length > 0 && <button onClick={recheckOutdated} disabled={rechecking}>{rechecking ? "Starting…" : `Re-check ${outdated.length} outdated`}</button>}
+          <NewPhotoButton sceneId={scene.id} onError={onError} />
+        </div>
       </div>
       {!collapsed && (
       <>
@@ -537,15 +589,16 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
                     <img src={c.snapshot.url} alt="" loading="lazy" />
                     <span className="irow-main">
                       <span className="irow-title"><SourceIcon source={c.source} /> {c.source.type === "video" ? c.source.inspectionName : "Photo"}</span>
-                      <span className="muted small">{ago(c.createdAt)}</span>
+                      <span className="muted small">{ago(c.takenAt)}</span>
                       <span className="irow-tags">
                         <ReviewPill c={c} />
                         {c.issues > 0 && <span className="tag-issue">{plural(c.issues, "issue")}</span>}
                         {c.flags > 0 && <span className="tag-review">{c.flags} to decide</span>}
+                        {c.outdated && <span className="tag-outdated" title="The setup changed after this inspection was checked">Outdated</span>}
                       </span>
                     </span>
                   </a>
-                  <button type="button" className="icon irow-delete" aria-label={`Delete inspection from ${ago(c.createdAt)}`}
+                  <button type="button" className="icon irow-delete" aria-label={`Delete inspection from ${ago(c.takenAt)}`}
                     title="Delete this inspection" onClick={() => remove(c.id, c.status === "running")}>✕</button>
                 </li>
               ))}
@@ -563,38 +616,57 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
   );
 }
 
+const MAX_BATCH = 20;
+
+// One or many photos: each becomes its own inspection. They upload one at a time; the server dates each one
+// from the camera (EXIF) and lists them by that, so the order picked doesn't matter.
 export function NewPhotoButton({ sceneId, primary, onError }: { sceneId: string; primary?: boolean; onError: (message: string) => void }) {
   const ref = useRef<HTMLInputElement>(null);
-  const [progress, setProgress] = useState<number | null>(null);
-  const busy = progress !== null;
-  const send = async (file: File | undefined) => {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) return onError("Choose a photo (JPEG, PNG or WebP).");
-    setProgress(0);
+  const [upload, setUpload] = useState<{ n: number; of: number; pct: number } | null>(null);
+  const send = async (picked: File[]) => {
+    if (!picked.length) return;
+    if (picked.length > MAX_BATCH) return onError(`Choose up to ${MAX_BATCH} photos at a time.`);
     onError("");
-    const body = new FormData();
-    body.append("image", file);
-    try {
-      const { checkId } = await uploadForm<{ checkId: string }>(`/api/scenes/${sceneId}/snapshots`, body, setProgress);
-      setProgress(100);
-      location.hash = `#/scenes/${sceneId}/i/${checkId}`;
+    const failed: string[] = [];
+    const started: { checkId: string; takenAt: string }[] = [];
+    for (const [i, file] of picked.entries()) {
+      setUpload({ n: i + 1, of: picked.length, pct: 0 });
+      if (!file.type.startsWith("image/")) {
+        failed.push(`${file.name}: not a photo (use JPEG, PNG or WebP)`);
+        continue;
+      }
+      const body = new FormData();
+      body.append("image", file);
+      try {
+        started.push(await uploadForm<{ checkId: string; takenAt: string }>(`/api/scenes/${sceneId}/snapshots`, body,
+          (pct) => setUpload({ n: i + 1, of: picked.length, pct })));
+      } catch (err) {
+        failed.push(picked.length > 1 ? `${file.name}: ${(err as Error).message}` : (err as Error).message);
+      }
+    }
+    setUpload(null);
+    if (ref.current) ref.current.value = "";
+    if (failed.length) {
+      onError(picked.length > 1 ? `${failed.length} of ${picked.length} photos weren't added. ${failed.join(" · ")}` : failed[0]);
+    }
+    // Open the earliest photo of the batch, so review goes in the order they were taken.
+    const first = started.sort((a, b) => a.takenAt.localeCompare(b.takenAt))[0];
+    if (first) {
+      location.hash = `#/scenes/${sceneId}/i/${first.checkId}`;
       document.getElementById("inspections")?.scrollIntoView({ behavior: "smooth" });
-    } catch (err) {
-      onError((err as Error).message);
-    } finally {
-      setProgress(null);
-      if (ref.current) ref.current.value = "";
     }
   };
+  const total = upload ? Math.round(((upload.n - 1) * 100 + upload.pct) / upload.of) : 0;
   return (
     <span className="upload-wrap">
-      <input ref={ref} type="file" accept="image/*" hidden onChange={(e) => send(e.target.files?.[0])} />
-      <button className={primary ? "primary" : undefined} onClick={() => ref.current?.click()} disabled={busy}>
-        {busy ? (progress !== null && progress >= 100 ? "Starting check…" : `Uploading… ${progress ?? 0}%`) : "+ New inspection"}
+      <input ref={ref} type="file" accept="image/*" multiple hidden onChange={(e) => send([...(e.target.files ?? [])])} />
+      <button className={primary ? "primary" : undefined} onClick={() => ref.current?.click()} disabled={!!upload}
+        title={upload ? undefined : `Pick one photo, or up to ${MAX_BATCH} at once`}>
+        {upload ? (upload.of > 1 ? `Uploading ${upload.n} of ${upload.of}…` : `Uploading… ${upload.pct}%`) : "+ New inspection"}
       </button>
-      {busy && (
-        <span className="upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress ?? 0} aria-label="Uploading photo">
-          <span className="bar"><div style={{ width: `${progress ?? 0}%` }} /></span>
+      {upload && (
+        <span className="upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={total} aria-label="Uploading photos">
+          <span className="bar"><div style={{ width: `${total}%` }} /></span>
         </span>
       )}
     </span>

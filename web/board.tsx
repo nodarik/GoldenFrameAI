@@ -54,7 +54,8 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
       )}
 
       {editing && (
-        <SceneDialog scene={editing === "new" ? null : editing} groups={[...new Set((scenes ?? []).map((s) => s.group).filter(Boolean))]}
+        <SceneDialog scene={editing === "new" ? null : editing} groups={[...new Set((scenes ?? []).map((s) => s.group).filter(Boolean))].sort()}
+          assignees={[...new Set((scenes ?? []).map((s) => s.assignee).filter(Boolean))].sort()}
           defaultGroup={group ?? ""} onClose={() => setEditing(null)}
           onSaved={(id, created) => { setEditing(null); onChange(); if (created) location.hash = `#/scenes/${id}`; }} />
       )}
@@ -66,14 +67,18 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
 function cardNote(s: SceneSummary): { text: string; tone?: "issue" | "review" } {
   if (!s.golden) return { text: "Add a golden photo" };
   if (s.itemCount === 0 && s.ruleCount === 0) return { text: "Mark what to watch" };
+  const total = s.checkCount ?? 0;
   const l = s.lastCheck;
-  if (!l) return { text: "No inspections yet" };
-  if (l.status === "running") return { text: "Checking…", tone: "review" };
-  if (s.toReview > 0) return { text: `${plural(s.toReview, "inspection")} to review`, tone: "review" };
-  if (l.status === "retake") return { text: "Retake photo", tone: "issue" };
-  if (l.status === "failed") return { text: "Check failed", tone: "issue" };
-  if (l.issues > 0) return { text: plural(l.issues, "issue"), tone: "issue" };
-  return { text: "All good" };
+  if (!l || total === 0) return { text: "No inspections yet" };
+  if (l.status === "running") return { text: total === 1 ? "1 inspection · Checking…" : `${total} inspections · Checking…`, tone: "review" };
+  if (s.toReview > 0) {
+    if (s.toReview === total) return { text: plural(s.toReview, "inspection") + " to review", tone: "review" };
+    return { text: `${plural(total, "inspection")} · ${s.toReview} to review`, tone: "review" };
+  }
+  if (l.status === "retake") return { text: `${plural(total, "inspection")} · Retake photo`, tone: "issue" };
+  if (l.status === "failed") return { text: `${plural(total, "inspection")} · Check failed`, tone: "issue" };
+  if (l.issues > 0) return { text: `${plural(total, "inspection")} · ${plural(l.issues, "issue")}`, tone: "issue" };
+  return { text: `${plural(total, "inspection")} · All good` };
 }
 
 function SceneCard({ s, onEdit, onDelete }: { s: SceneSummary; onEdit: () => void; onDelete: () => void }) {
@@ -148,8 +153,8 @@ export function Dialog({ title, onClose, children }: { title: string; onClose: (
   );
 }
 
-export function SceneDialog({ scene, groups, defaultGroup = "", onClose, onSaved }: {
-  scene: { id: string; name: string; group: string; assignee: string } | null; groups: string[]; defaultGroup?: string;
+export function SceneDialog({ scene, groups, assignees = [], defaultGroup = "", onClose, onSaved }: {
+  scene: { id: string; name: string; group: string; assignee: string } | null; groups: string[]; assignees?: string[]; defaultGroup?: string;
   onClose: () => void; onSaved: (id: string, created: boolean) => void;
 }) {
   const [name, setName] = useState(scene?.name ?? "");
@@ -177,11 +182,14 @@ export function SceneDialog({ scene, groups, defaultGroup = "", onClose, onSaved
       <form onSubmit={save} className="form">
         <label>Name<input type="text" value={name} maxLength={80} autoFocus placeholder="Room 1201 – bed" onChange={(e) => { setName(e.target.value); setError(""); }} /></label>
         <label>Group <span className="muted">· location, floor or client</span>
-          <input type="text" value={group} maxLength={60} list="scene-groups" placeholder="The Continental – Floor 12" onChange={(e) => setGroup(e.target.value)} />
+          <input type="text" value={group} maxLength={60} list="scene-groups" placeholder="The Continental – Floor 12"
+            autoComplete="off" onChange={(e) => setGroup(e.target.value)} />
           <datalist id="scene-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
         </label>
         <label>Assignee <span className="muted">· who keeps it right</span>
-          <input type="text" value={assignee} maxLength={60} placeholder="Maria Santos" onChange={(e) => setAssignee(e.target.value)} />
+          <input type="text" value={assignee} maxLength={60} list="scene-assignees" placeholder="Maria Santos"
+            autoComplete="off" onChange={(e) => setAssignee(e.target.value)} />
+          <datalist id="scene-assignees">{assignees.map((a) => <option key={a} value={a} />)}</datalist>
         </label>
         {error && <p className="err" role="alert">{error}</p>}
         <div className="row end">

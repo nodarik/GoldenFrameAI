@@ -41,6 +41,8 @@ export type CheckStatus = "running" | "ok" | "issues" | "needs_review" | "retake
 
 // An item counts as moved when a matched pair of boxes is further apart than this (fraction of the image).
 const MOVE_DISTANCE = 0.15;
+// A match overlapping a spot a person told us to ignore this much is that ignored object.
+const IGNORED_IOU = 0.3;
 // A Spark box this close to an item's boxes is about that item.
 const SAME_PLACE_IOU = 0.1;
 const BANNED = /\b(certified|compliant|safe|guaranteed)\b/gi;
@@ -72,10 +74,14 @@ export const matchPairs = (golden: Box[], found: Box[]) =>
 
 export const furthestMove = (golden: Box[], found: Box[]) => Math.max(0, ...match(golden, found).matched.map((p) => p.d));
 
+// Drop matches that sit on an ignored spot (golden photo coordinates), e.g. the third of three pillows nobody watches.
+export const notIgnored = (boxes: Box[], ignored: Box[], toGolden = SAME_FRAMING.toGolden) =>
+  ignored.length ? boxes.filter((b) => !ignored.some((x) => iou(toGolden(b), x) > IGNORED_IOU)) : boxes;
+
 export function itemResult(
-  item: { id: string; name: string; expected: number; goldenBoxes: Box[]; positionMatters: boolean }, all: Box[], framing = SAME_FRAMING,
+  item: { id: string; name: string; expected: number; goldenBoxes: Box[]; ignoredBoxes: Box[]; positionMatters: boolean }, all: Box[], framing = SAME_FRAMING,
 ): ItemResult {
-  const found = all.filter((b) => !framing.outside(b));
+  const found = notIgnored(all, item.ignoredBoxes, framing.toGolden).filter((b) => !framing.outside(b));
   const moved = item.positionMatters && found.length === item.expected && item.expected > 0 &&
     furthestMove(item.goldenBoxes, found.map(framing.toGolden)) > MOVE_DISTANCE;
   return {
@@ -107,10 +113,12 @@ export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => s
       const agreed = sparkAgrees(item, "missing", item.expected - item.found);
       // Mark only the golden spots nothing was found near, on both photos: "it was here".
       const gone = match(item.goldenBoxes, item.boxes).unmatchedGolden;
+      // SAM searches each photo by phrase, so it can miss one that is plainly there (a bag on the ground that
+      // doesn't look much like "handlebar bag"). Without Spark agreeing, a person decides, after Wonder's look.
       findings.push({
         ...base(item), boxes: gone, goldenBoxes: gone, kind: "item_missing", text: `${item.name}: ${item.found} of ${item.expected} found`,
-        source: agreed ? "both" : "sam", status: "confirmed",
-        why: `SAM counted ${item.found}, expected ${item.expected}.${agreed ? " Spark agrees." : ""}`,
+        source: agreed ? "both" : "sam", status: agreed ? "confirmed" : "needs_review",
+        why: `SAM counted ${item.found}, expected ${item.expected}.${agreed ? " Spark agrees." : " Spark didn't report it missing. A person decides."}`,
       });
     } else if (item.found > item.expected) {
       findings.push({

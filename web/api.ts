@@ -17,7 +17,7 @@ export type LastCheck = { id: string; status: CheckStatus; reviewStatus: ReviewS
 
 export type SceneSummary = {
   id: string; name: string; group: string; assignee: string; createdAt: string; golden: Media | null;
-  itemCount: number; ruleCount: number; toReview: number; lastCheck: LastCheck | null;
+  itemCount: number; ruleCount: number; toReview: number; checkCount: number; lastCheck: LastCheck | null;
 };
 export type Scene = { id: string; name: string; group: string; assignee: string; golden: Media | null; items: Item[]; checklist: Rule[] };
 export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string };
@@ -42,8 +42,11 @@ export type Source = { type: "photo" } | { type: "video"; inspectionId: string; 
 export type Review = { id: number; action: string; note: string | null; by: string | null; at: string };
 
 export type CheckSummary = {
-  id: string; sceneId: string; status: CheckStatus; createdAt: string; costUsd: number;
+  // takenAt: when the camera took the photo (EXIF), else when it was uploaded. Inspections are listed by it.
+  id: string; sceneId: string; status: CheckStatus; createdAt: string; takenAt: string; costUsd: number;
   reviewStatus: ReviewStatus; reviewedAt: string | null; issues: number; flags: number; source: Source;
+  // The golden photo, watched items or checklist changed after this check ran: re-check to include the changes.
+  outdated: boolean;
   score: { ok: number; total: number } | null; snapshot: Media;
   // The golden photo this check was compared with (the scene's may have been replaced since).
   golden: Media;

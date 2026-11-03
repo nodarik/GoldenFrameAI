@@ -91,7 +91,8 @@ function startCheck(scene: SceneRow, golden: Img, frame: Img): string {
   saveMedia(rel, frame.buf);
   db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, 'checking')")
     .run(snapshotId, scene.id, now, now, rel, frame.w, frame.h);
-  db.prepare("INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h) VALUES (?, ?, 'running', '{}', ?, ?, ?, ?)")
-    .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h);
+  db.prepare(`INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h, setup_version)
+    VALUES (?, ?, 'running', '{}', ?, ?, ?, ?, (SELECT setup_version FROM scenes WHERE id = ?))`)
+    .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h, scene.id);
   return checkId;
 }

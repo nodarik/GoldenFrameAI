@@ -12,7 +12,7 @@ import { type CheckRow, type ItemRow, type ReviewRow, type SceneRow, type Snapsh
 import { env } from "./env.js";
 import { newId, newSecret, nowIso } from "./ids.js";
 import { type CheckResult, ReviewError, decide, failInterrupted, openFlags, runCheck, setReview } from "./golden.js";
-import { type Img, load, normalise } from "./images.js";
+import { type Box, type Img, load, normalise, takenAt } from "./images.js";
 import { DRAFT_CHECKLIST, errorText, imagePart, json } from "./meta.js";
 import { SpendLimitError, bus, spentTodayUsd } from "./runlog.js";
 import { TapError, detectItems, recount, tapToItem } from "./setup.js";
@@ -77,7 +77,8 @@ app.get("/api/scenes", (c) => {
   );
   const last = new Map(
     (db.prepare(`SELECT s.scene_id, c.id, c.status, c.review_status, c.result_json, c.created_at FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
-      WHERE c.created_at = (SELECT MAX(c2.created_at) FROM checks c2 JOIN snapshots s2 ON s2.id = c2.snapshot_id WHERE s2.scene_id = s.scene_id)`)
+      WHERE c.id = (SELECT c2.id FROM checks c2 JOIN snapshots s2 ON s2.id = c2.snapshot_id WHERE s2.scene_id = s.scene_id
+        ORDER BY s2.captured_at DESC, c2.created_at DESC LIMIT 1)`)
       .all() as { scene_id: string; id: string; status: string; review_status: string; result_json: string; created_at: string }[])
       .map((r) => {
         const tally = tallyOf(JSON.parse(r.result_json));
@@ -88,9 +89,13 @@ app.get("/api/scenes", (c) => {
     (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
       WHERE c.review_status = 'needs_review' GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
   );
+  const totals = new Map(
+    (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
+      GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
+  );
   return c.json(scenes.map((s) => ({
     ...sceneJson(s), itemCount: counts.get(s.id) ?? 0, ruleCount: getChecklist(s.id).length,
-    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0,
+    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0, checkCount: totals.get(s.id) ?? 0,
   })));
 });
 
@@ -142,13 +147,14 @@ app.delete("/api/scenes/:id", (c) => {
   return c.body(null, 204);
 });
 
-// Reads the multipart `image` field and normalises it, or returns the error to send.
-async function readPhoto(body: Record<string, unknown>): Promise<Img | { error: string; status: 400 | 413 }> {
+// Reads the multipart `image` field and normalises it, with when the camera took it, or returns the error to send.
+async function readPhoto(body: Record<string, unknown>): Promise<(Img & { takenAt: string | null }) | { error: string; status: 400 | 413 }> {
   const file = body.image;
   if (!(file instanceof File)) return { error: "Attach a photo.", status: 400 };
   if (file.size > MAX_UPLOAD_BYTES) return { error: "Photos must be 15 MB or smaller.", status: 413 };
   try {
-    return await normalise(Buffer.from(await file.arrayBuffer()));
+    const buf = Buffer.from(await file.arrayBuffer());
+    return { ...(await normalise(buf)), takenAt: await takenAt(buf) };
   } catch {
     return { error: "That file isn't a photo we can read. Use JPEG, PNG or WebP.", status: 400 };
   }
@@ -208,6 +214,10 @@ app.post("/api/scenes/:id/items/detect", async (c) => {
   }
 });
 
+// A box a person drew or corrected on the golden photo, in 0–1 units of the photo.
+const UnitBox = z.object({ left: z.number(), top: z.number(), right: z.number(), bottom: z.number() })
+  .refine((b) => b.left >= 0 && b.top >= 0 && b.right <= 1 && b.bottom <= 1 && b.right - b.left >= 0.01 && b.bottom - b.top >= 0.01);
+
 app.put("/api/items/:id", async (c) => {
   const item = db.prepare("SELECT * FROM items WHERE id = ?").get(c.req.param("id")) as ItemRow | undefined;
   if (!item) return c.json({ error: "Item not found." }, 404);
@@ -217,9 +227,20 @@ app.put("/api/items/:id", async (c) => {
       phrase: z.string().trim().min(1).max(40).optional(),
       expectedCount: z.number().int().min(0).max(50).optional(),
       positionMatters: z.boolean().optional(),
+      // Moved or resized boxes, one for each box the item already has.
+      boxes: z.array(UnitBox).min(1).max(50).optional(),
+      // Stop watching one of the item's objects: its box goes, and matches in that spot aren't counted.
+      removeBox: z.number().int().min(0).optional(),
     })
     .safeParse(await c.req.json().catch(() => null));
-  if (!body.success) return c.json({ error: "Check the fields: name up to 60, phrase up to 40 characters, count 0–50." }, 400);
+  if (!body.success) return c.json({ error: "Check the fields: name up to 60, phrase up to 40 characters, count 0–50, boxes inside the photo." }, 400);
+  const oldBoxes = JSON.parse(item.boxes_json) as Box[];
+  if (body.data.boxes && body.data.boxes.length !== oldBoxes.length) return c.json({ error: "Send one box for each box the item has." }, 400);
+  const boxEdit = body.data.boxes !== undefined || body.data.removeBox !== undefined;
+  if (boxEdit && body.data.phrase && body.data.phrase !== item.phrase) return c.json({ error: "Change the phrase and the boxes separately." }, 400);
+  if (body.data.boxes && body.data.removeBox !== undefined) return c.json({ error: "Move boxes and delete one separately." }, 400);
+  if (body.data.removeBox !== undefined && body.data.removeBox >= oldBoxes.length) return c.json({ error: "That box is already gone." }, 400);
+  if (body.data.removeBox !== undefined && oldBoxes.length === 1) return c.json({ error: "That's its only box. Use \"Stop watching\" to remove the item." }, 400);
   const next = { ...item };
   if (body.data.name) next.name = body.data.name;
   if (body.data.positionMatters !== undefined) next.position_matters = body.data.positionMatters ? 1 : 0;
@@ -232,16 +253,33 @@ app.put("/api/items/:id", async (c) => {
       next.masks_json = r.boxes.length ? JSON.stringify(r.masks) : null;
       next.expected_count = Math.max(1, r.boxes.length);
       next.phrase_matches = r.matches ? 1 : 0;
+      // A fresh count from SAM starts over: earlier ignored spots no longer line up with its boxes.
+      next.ignored_json = null;
     } catch (e) {
       const f = failure(e);
       return c.json({ error: f.error }, f.status);
     }
   }
   if (body.data.expectedCount !== undefined) next.expected_count = body.data.expectedCount;
+  if (body.data.boxes) {
+    // SAM's outline no longer fits a box a person moved, so it's dropped for that box; untouched boxes keep theirs.
+    const masks = (next.masks_json ? JSON.parse(next.masks_json) : []) as unknown[];
+    const same = (a: Box, b: Box) => a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+    next.masks_json = JSON.stringify(body.data.boxes.map((b, i) => (same(b, oldBoxes[i]) ? masks[i] ?? null : null)));
+    next.boxes_json = JSON.stringify(body.data.boxes);
+  }
+  if (body.data.removeBox !== undefined) {
+    const at = body.data.removeBox;
+    const masks = (next.masks_json ? JSON.parse(next.masks_json) : oldBoxes.map(() => null)) as unknown[];
+    next.boxes_json = JSON.stringify(oldBoxes.filter((_, i) => i !== at));
+    next.masks_json = JSON.stringify(masks.filter((_, i) => i !== at));
+    next.ignored_json = JSON.stringify([...JSON.parse(item.ignored_json ?? "[]"), oldBoxes[at]]);
+    next.expected_count = Math.max(0, next.expected_count - 1);
+  }
   db.prepare(`UPDATE items SET name = :name, phrase = :phrase, expected_count = :expected_count, boxes_json = :boxes_json,
-    masks_json = :masks_json, phrase_matches = :phrase_matches, position_matters = :position_matters WHERE id = :id`).run({
+    masks_json = :masks_json, ignored_json = :ignored_json, phrase_matches = :phrase_matches, position_matters = :position_matters WHERE id = :id`).run({
     id: next.id, name: next.name, phrase: next.phrase, expected_count: next.expected_count, boxes_json: next.boxes_json,
-    masks_json: next.masks_json, phrase_matches: next.phrase_matches, position_matters: next.position_matters,
+    masks_json: next.masks_json, ignored_json: next.ignored_json, phrase_matches: next.phrase_matches, position_matters: next.position_matters,
   });
   return c.json(itemJson(next));
 });
@@ -313,9 +351,12 @@ app.post("/api/scenes/:id/checklist/draft", async (c) => {
 });
 
 // ---------- checks: compare a new photo with the golden one ----------
-type CheckJoined = CheckRow & { scene_id: string; snapshot_path: string; snapshot_w: number; snapshot_h: number };
-const CHECK_SELECT = `SELECT c.*, s.scene_id, s.path AS snapshot_path, s.w AS snapshot_w, s.h AS snapshot_h
-  FROM checks c JOIN snapshots s ON s.id = c.snapshot_id`;
+type CheckJoined = CheckRow & {
+  scene_id: string; snapshot_path: string; snapshot_w: number; snapshot_h: number; captured_at: string; scene_setup_version: number;
+};
+const CHECK_SELECT = `SELECT c.*, s.scene_id, s.path AS snapshot_path, s.w AS snapshot_w, s.h AS snapshot_h, s.captured_at,
+  sc.setup_version AS scene_setup_version
+  FROM checks c JOIN snapshots s ON s.id = c.snapshot_id JOIN scenes sc ON sc.id = s.scene_id`;
 const getCheck = (id: string) => db.prepare(`${CHECK_SELECT} WHERE c.id = ?`).get(id) as CheckJoined | undefined;
 
 // A check either came from a photo upload or is the frame a video inspection picked for this scene.
@@ -328,14 +369,16 @@ const sourceOf = (checkId: string) => {
 const checkJson = (c: CheckJoined, full: boolean) => {
   const result = JSON.parse(c.result_json);
   return {
-    id: c.id, sceneId: c.scene_id, status: c.status, createdAt: c.created_at, costUsd: c.cost_usd,
+    id: c.id, sceneId: c.scene_id, status: c.status, createdAt: c.created_at, takenAt: c.captured_at, costUsd: c.cost_usd,
     reviewStatus: c.review_status, reviewedAt: c.reviewed_at, ...tallyOf(result), source: sourceOf(c.id),
+    // The golden photo, watched items or checklist changed after this check ran.
+    outdated: c.status !== "running" && c.setup_version < c.scene_setup_version,
     score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
     findingCount: (result.findings ?? []).filter((f: { status: string }) => f.status !== "rejected").length,
     snapshot: { url: `/media/snapshots/${c.snapshot_id}.jpg`, w: c.snapshot_w, h: c.snapshot_h },
     golden: { url: `/media/checks/${c.id}/golden.jpg`, w: c.golden_w, h: c.golden_h },
     ...(full
-      ? { result, history: db.prepare("SELECT * FROM check_reviews WHERE check_id = ? ORDER BY id DESC").all(c.id) as ReviewRow[] }
+      ? { result, history: db.prepare("SELECT id, check_id, action, note, by, at FROM check_reviews WHERE check_id = ? ORDER BY id DESC").all(c.id) as ReviewRow[] }
       : {}),
   };
 };
@@ -348,14 +391,42 @@ async function startCheck(scene: SceneRow, body: Record<string, unknown>, source
   if ("error" in img) return img;
 
   const snapshotId = newId("snp"), checkId = newId("chk"), now = nowIso();
+  // Inspections sort by when the photo was taken; a camera clock set in the future counts as now.
+  const captured = img.takenAt && img.takenAt < now ? img.takenAt : now;
   const rel = `scenes/${scene.id}/snapshots/${snapshotId}.jpg`;
   saveMedia(rel, img.buf);
   db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'checking')")
-    .run(snapshotId, scene.id, source, now, now, rel, img.w, img.h);
-  db.prepare("INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h) VALUES (?, ?, 'running', '{}', ?, ?, ?, ?)")
-    .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h);
+    .run(snapshotId, scene.id, source, captured, now, rel, img.w, img.h);
+  db.prepare(`INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h, setup_version)
+    VALUES (?, ?, 'running', '{}', ?, ?, ?, ?, (SELECT setup_version FROM scenes WHERE id = ?))`)
+    .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h, scene.id);
   void runCheck(scene, checkId, golden, img);
-  return { checkId, snapshotId };
+  return { checkId, snapshotId, takenAt: captured };
+}
+
+// Check a finished inspection again on the same photo, against the scene's current golden photo, items and checklist.
+// The previous result stays with the history entry, and the inspection waits for review again.
+async function recheck(check: CheckJoined, by: string | null) {
+  const scene = getScene(check.scene_id)!;
+  const golden = await goldenOf(scene);
+  if (!golden) return { error: "Upload the golden photo first.", status: 400 as const };
+  let snap: Img;
+  try {
+    snap = await load(readFileSync(resolve(env.DATA_DIR, check.snapshot_path)));
+  } catch {
+    return { error: "This inspection's photo is missing, so it can't be checked again.", status: 409 as const };
+  }
+  // Claimed in one statement, so two clicks can't start it twice.
+  const claimed = db.prepare(`UPDATE checks SET status = 'running', result_json = '{}', score_ok = NULL, score_total = NULL,
+    review_status = 'needs_review', reviewed_at = NULL, golden_path = ?, golden_w = ?, golden_h = ?, setup_version = ?
+    WHERE id = ? AND status != 'running'`).run(scene.golden_path, golden.w, golden.h, scene.setup_version, check.id);
+  if (!claimed.changes) return { error: "It's already being checked.", status: 409 as const };
+  db.prepare("INSERT INTO check_reviews (check_id, action, note, by, at, result_json) VALUES (?, 'rechecked', ?, ?, ?, ?)")
+    .run(check.id, "Checked again with the current golden photo, items and checklist.", by, nowIso(), check.result_json);
+  db.prepare("UPDATE snapshots SET status = 'checking' WHERE id = ?").run(check.snapshot_id);
+  bus.emit("check", { id: check.id, sceneId: scene.id, status: "running" });
+  void runCheck(scene, check.id, golden, snap);
+  return { ok: true as const };
 }
 
 app.post("/api/scenes/:id/snapshots", async (c) => {
@@ -367,7 +438,7 @@ app.post("/api/scenes/:id/snapshots", async (c) => {
 
 app.get("/api/scenes/:id/checks", (c) => {
   const limit = Math.min(Number(c.req.query("limit") ?? 50) || 50, 200);
-  const rows = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? ORDER BY c.created_at DESC LIMIT ?`).all(c.req.param("id"), limit) as CheckJoined[];
+  const rows = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? ORDER BY s.captured_at DESC, c.created_at DESC LIMIT ?`).all(c.req.param("id"), limit) as CheckJoined[];
   return c.json(rows.map((r) => checkJson(r, false)));
 });
 
@@ -394,6 +465,26 @@ app.delete("/api/checks/:id", (c) => {
 });
 
 const Reviewer = z.string().trim().max(60).optional().transform((s) => s || null);
+
+app.post("/api/checks/:id/recheck", async (c) => {
+  const check = getCheck(c.req.param("id"));
+  if (!check) return c.json({ error: "Inspection not found." }, 404);
+  const by = Reviewer.safeParse((await c.req.json().catch(() => ({})))?.by);
+  const done = await recheck(check, by.success ? by.data : null);
+  return "error" in done ? c.json({ error: done.error }, done.status) : c.json(checkJson(getCheck(check.id)!, true), 202);
+});
+
+// Every finished inspection of the scene that ran against an older setup. They queue like a batch of uploads.
+app.post("/api/scenes/:id/recheck", async (c) => {
+  const scene = getScene(c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const by = Reviewer.safeParse((await c.req.json().catch(() => ({})))?.by);
+  const outdated = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? AND c.status != 'running' AND c.setup_version < sc.setup_version`)
+    .all(scene.id) as CheckJoined[];
+  let started = 0;
+  for (const check of outdated) if ("ok" in (await recheck(check, by.success ? by.data : null))) started++;
+  return c.json({ started, of: outdated.length }, 202);
+});
 
 // A person decides one finding or checklist rule.
 app.post("/api/checks/:id/decide", async (c) => {
