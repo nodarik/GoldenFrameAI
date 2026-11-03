@@ -1,5 +1,6 @@
-# Replace `goldenframe` with your app name on first `fly launch`.
 app = "goldenframe"
+# Must match the region of the gf_data volume mounted below.
+primary_region = "fra"
 
 [http_service]
   internal_port = 8080
