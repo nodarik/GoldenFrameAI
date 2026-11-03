@@ -120,7 +120,7 @@ curl -H "Authorization: Bearer $TOKEN" -F image=@photo.jpg https://your-app.exam
 # 202 {"checkId":"chk_…","snapshotId":"snp_…"}
 ```
 
-The check runs exactly like an upload in the app and appears there for review. When it finishes, GoldenFrame POSTs to the webhook URL:
+The check runs exactly like an upload in the app and appears there for review. Inspections are listed by when the photo was taken (its EXIF date, else when it arrived), so photos can be sent in any order. When it finishes, GoldenFrame POSTs to the webhook URL:
 
 ```json
 { "event": "check.finished", "check": { "id": "chk_…", "sceneId": "scn_…", "status": "issues", "score": { "ok": 4, "total": 5 }, "result": { "findings": [], "checklist": [], "summary": "…" } } }

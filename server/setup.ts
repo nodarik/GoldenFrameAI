@@ -51,10 +51,11 @@ function insertItem(scene: SceneRow, golden: Img, named: { name: string; phrase:
     expected_count: boxes.length, boxes_json: JSON.stringify(boxes), tap_box_json: JSON.stringify(toUnit(tapped.box, golden)),
     mask_svg: tapped.mask ? JSON.stringify(tapped.mask) : null, phrase_matches: matches ? 1 : 0,
     position_matters: 1, created_at: nowIso(), masks_json: JSON.stringify(dets.map((d) => d.mask ?? null)),
+    ignored_json: null,
   };
   db.prepare(
-    `INSERT INTO items (id, scene_id, name, phrase, expected_count, boxes_json, tap_box_json, mask_svg, phrase_matches, position_matters, created_at, masks_json)
-     VALUES (:id, :scene_id, :name, :phrase, :expected_count, :boxes_json, :tap_box_json, :mask_svg, :phrase_matches, :position_matters, :created_at, :masks_json)`,
+    `INSERT INTO items (id, scene_id, name, phrase, expected_count, boxes_json, tap_box_json, mask_svg, phrase_matches, position_matters, created_at, masks_json, ignored_json)
+     VALUES (:id, :scene_id, :name, :phrase, :expected_count, :boxes_json, :tap_box_json, :mask_svg, :phrase_matches, :position_matters, :created_at, :masks_json, :ignored_json)`,
   ).run(row);
   return row;
 }
@@ -81,8 +82,9 @@ export async function detectItems(scene: SceneRow, golden: Img): Promise<ItemRow
     if (retried.length) k.phrase = head;
     return retried;
   });
-  const taken = db.prepare("SELECT boxes_json FROM items WHERE scene_id = ?").all(scene.id)
-    .flatMap((r) => JSON.parse((r as { boxes_json: string }).boxes_json) as Box[]).map((b) => fromUnit(b, golden));
+  // Watched boxes and ignored spots are both taken, so an object a person removed isn't found again.
+  const taken = (db.prepare("SELECT boxes_json, ignored_json FROM items WHERE scene_id = ?").all(scene.id) as { boxes_json: string; ignored_json: string | null }[])
+    .flatMap((r) => [...JSON.parse(r.boxes_json), ...JSON.parse(r.ignored_json ?? "[]")] as Box[]).map((b) => fromUnit(b, golden));
   const created: ItemRow[] = [];
   kinds.forEach((k, n) => {
     const dets = found[n].filter((d) => area(d.box) <= MAX_TAP_AREA * golden.w * golden.h);

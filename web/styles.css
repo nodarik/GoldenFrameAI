@@ -180,6 +180,18 @@ label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
 .shape-mask { fill: var(--c); fill-opacity: 0.22; transition: fill-opacity 0.25s; pointer-events: visiblePainted; }
 .shape.is-dashed .shape-box { stroke-dasharray: 12 8; }
 .shape.is-dim { opacity: 0.25; }
+.edit-box { pointer-events: auto; touch-action: none; }
+.edit-body { fill: var(--c); fill-opacity: 0.08; stroke: var(--c); cursor: move; }
+.edit-body:focus-visible { outline: none; fill-opacity: 0.2; }
+.edit-handle { fill: #fff; stroke: var(--c); }
+.edit-nw, .edit-se { cursor: nwse-resize; }
+.edit-ne, .edit-sw { cursor: nesw-resize; }
+.edit-delete { cursor: pointer; }
+.edit-delete circle { fill: #fff; stroke: var(--issue); }
+.edit-delete path { stroke: var(--issue); stroke-linecap: round; }
+.edit-delete:hover circle, .edit-delete:focus-visible circle { fill: var(--issue); }
+.edit-delete:hover path, .edit-delete:focus-visible path { stroke: #fff; }
+.edit-delete:focus-visible { outline: none; }
 .shape.is-lit { filter: drop-shadow(0 0 6px var(--c)) drop-shadow(0 0 18px var(--c)); transform: scale(1.015); }
 .shape.is-lit .shape-mask { fill-opacity: 0.45; }
 .shape.is-lit .shape-box { stroke-opacity: 1; stroke-dasharray: 16 10; animation: march 0.9s linear infinite; }
@@ -271,6 +283,7 @@ button:hover > .toggle, button.section-head:hover .toggle { background: var(--ac
 .tag-issue, .tag-review { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; }
 .tag-issue { background: var(--issue-bg); color: var(--issue); }
 .tag-review { background: var(--review-bg); color: var(--review); }
+.tag-outdated { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
 .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .pill-review { background: var(--review-bg); color: var(--review); }

@@ -43,6 +43,12 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
     }
   };
   const decide: Decide = (kind, targetId, decision) => void act(`/api/checks/${id}/decide`, { kind, id: targetId, decision });
+  const recheck = () => {
+    const was = check?.reviewStatus === "reviewed" ? " It was reviewed: it will need review again, and its current result stays in the history." : "";
+    if (confirm(`Check this photo again with the current golden photo, items and checklist? It costs about as much as a new inspection.${was}`)) {
+      void act(`/api/checks/${id}/recheck`, {});
+    }
+  };
 
   const remove = async () => {
     if (check?.status === "running") return setError("Wait until the check finishes.");
@@ -69,7 +75,14 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
   const differences = findings.filter((f) => !f.outsideFrame && f.status !== "rejected");
   const outside = findings.filter((f) => f.outsideFrame);
   const dismissed = findings.filter((f) => !f.outsideFrame && f.status === "rejected");
-  const passed = items.filter((i) => i.ok).length + rules.filter((x) => x.status === "pass").length;
+  // A watched object's count finding (missing, extra, moved) decides its row: a person or Wonder may have settled it.
+  const countFinding = (itemId: string) => findings.find((f) => f.itemId === itemId && !f.outsideFrame && f.kind.startsWith("item_"));
+  const itemState = (i: (typeof items)[number]) => {
+    const f = countFinding(i.itemId);
+    return f ? f.status : i.ok ? "pass" : "fail";
+  };
+  const itemPassed = items.filter((i) => ["pass", "rejected"].includes(itemState(i))).length;
+  const passed = itemPassed + rules.filter((x) => x.status === "pass").length;
   const total = items.length + rules.length;
 
   // Outlines, keyed so hovering a checklist row lights its outline on both photos, and back.
@@ -107,7 +120,8 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
             <ReviewPill c={check} />
           </div>
           <div className="muted small">
-            {when(check.createdAt)} · {STATUS_LABEL[check.status]}
+            {check.source.type === "photo" && Math.abs(Date.parse(check.createdAt) - Date.parse(check.takenAt)) > 60_000
+              ? <>Taken {when(check.takenAt)} · uploaded {when(check.createdAt)}</> : when(check.createdAt)} · {STATUS_LABEL[check.status]}
             {check.source.type === "video" && check.source.frameMs !== null && (
               <> · <a href={`#/walkthroughs/${check.source.inspectionId}`}>frame at {clock(check.source.frameMs)}</a></>
             )}
@@ -128,7 +142,15 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
 
       {error && <div className="banner error" role="alert">{error}</div>}
       {check.status === "running" && <div className="banner info"><span className="spinner" /> Comparing with the golden photo, counting what we watch and checking the checklist. Usually 20–40 seconds.</div>}
-      {check.status === "failed" && <div className="banner error">{r.error ?? "The check failed. Upload the photo again."}</div>}
+      {check.status === "failed" && (
+        <div className="banner error">{r.error ?? "The check failed."} <button className="sm" onClick={recheck}>Check again</button></div>
+      )}
+      {check.outdated && check.status !== "failed" && (
+        <div className="banner warn-bg">
+          <span><strong>The setup changed after this inspection was checked.</strong> The golden photo, what we watch or the checklist is different now, so this result doesn't include those changes.</span>
+          <button className="sm" onClick={recheck}>Re-check</button>
+        </div>
+      )}
       {check.status === "retake" && (
         <div className="banner warn-bg">
           <strong>Retake the photo.</strong> {r.alignment?.level === "far_off" ? "It's framed too differently from the golden photo to compare." : "It shows a different view."} {r.viewNote}
@@ -149,11 +171,18 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
       {done && check.status !== "retake" && (
         <div className="sections">
           {items.length > 0 && (
-            <Section name="WATCHED OBJECTS" count={`${items.filter((i) => i.ok).length}/${items.length}`} complete={items.every((i) => i.ok)}>
-              {items.map((i) => (
-                <Row key={i.itemId} id={`item:${i.itemId}`} {...row} state={i.ok ? "pass" : "fail"} text={`${i.name}: ${i.found} of ${i.expected}`}
-                  note={i.outsideFrame ? `${i.outsideFrame} more outside the golden view, not counted.` : undefined} />
-              ))}
+            <Section name="WATCHED OBJECTS" count={`${itemPassed}/${items.length}`} complete={itemPassed === items.length}>
+              {items.map((i) => {
+                const f = countFinding(i.itemId);
+                const note = [f && f.status !== "confirmed" ? f.why : "", i.outsideFrame ? `${i.outsideFrame} more outside the golden view, not counted.` : ""]
+                  .filter(Boolean).join(" ");
+                return (
+                  <Row key={i.itemId} id={`item:${i.itemId}`} {...row} state={itemState(i)} text={`${i.name}: ${i.found} of ${i.expected}`}
+                    note={note || undefined} opinion={f?.secondOpinion}
+                    onConfirm={f && (() => decide("finding", f.id, "confirm"))} onReject={f && (() => decide("finding", f.id, "reject"))}
+                    confirmLabel="It's an issue" rejectLabel="It's fine" />
+                );
+              })}
             </Section>
           )}
           {[...sections].map(([name, list]) => (
@@ -296,7 +325,7 @@ function ReviewBox({ check, onSet }: { check: Check; onSet: (status: "needs_revi
 
 const ACTION: Record<string, string> = {
   reviewed: "Marked reviewed", needs_review: "Marked needs review", auto_reviewed: "Reviewed automatically", note: "Note",
-  finding_confirmed: "Confirmed issue", finding_rejected: "Dismissed", rule_confirmed: "Rule failed", rule_rejected: "Rule passed",
+  rechecked: "Re-checked", finding_confirmed: "Confirmed issue", finding_rejected: "Dismissed", rule_confirmed: "Rule failed", rule_rejected: "Rule passed",
 };
 
 function History({ history }: { history: Review[] }) {

@@ -1,3 +1,4 @@
+import exifReader from "exif-reader";
 import sharp from "sharp";
 
 export type Img = { buf: Buffer; w: number; h: number };
@@ -16,6 +17,23 @@ export async function normalise(input: Buffer): Promise<Img> {
     .toBuffer();
   const { width, height } = await sharp(buf).metadata();
   return { buf, w: width!, h: height! };
+}
+
+// When the camera took the photo (EXIF DateTimeOriginal), as ISO, or null when the file doesn't say.
+// Read before normalise() strips metadata. EXIF stores wall-clock time; OffsetTimeOriginal (most phones
+// write it) makes it exact, without it the wall-clock time is taken as UTC.
+export async function takenAt(input: Buffer): Promise<string | null> {
+  try {
+    const { exif } = await sharp(input).metadata();
+    if (!exif) return null;
+    const { DateTimeOriginal: wall, OffsetTimeOriginal: offset } = exifReader(exif).Photo ?? {};
+    if (!(wall instanceof Date) || Number.isNaN(wall.getTime())) return null;
+    const m = /^([+-])(\d{2}):(\d{2})$/.exec(offset ?? "");
+    const shiftMs = m ? (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) * 60_000 : 0;
+    return new Date(wall.getTime() - shiftMs).toISOString();
+  } catch {
+    return null;
+  }
 }
 
 export async function load(buf: Buffer): Promise<Img> {

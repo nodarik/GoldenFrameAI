@@ -11,7 +11,7 @@ import { newId, nowIso } from "./ids.js";
 import { type Img, fromUnit, toUnit } from "./images.js";
 import { COMPARE, ISSUE_KINDS, SECOND_OPINION, SUMMARY, boxPrompt, errorText, imagePart, json, mapLimit, sam } from "./meta.js";
 import { bus } from "./runlog.js";
-import { type Finding, type ItemResult, type SecondOpinion, type SparkIssue, clampBox, itemResult, matchPairs, statusOf, verify } from "./verify.js";
+import { type Finding, type ItemResult, type SecondOpinion, type SparkIssue, clampBox, itemResult, matchPairs, notIgnored, statusOf, verify } from "./verify.js";
 
 export type CheckResult = {
   sameView: boolean; viewNote: string; items: ItemResult[]; findings: Finding[]; error?: string;
@@ -38,7 +38,26 @@ const MAX_EVIDENCE_MASKS = 5;
 
 const isRetake = (r: CheckResult) => !r.sameView || r.alignment?.level === "far_off";
 
+// At most this many checks call the models at once, so a batch of photos doesn't hit the rate limits;
+// the rest wait their turn and show as running meanwhile.
+const CHECKS_PARALLEL = 3;
+let checksActive = 0;
+const checksWaiting: (() => void)[] = [];
+
 export async function runCheck(scene: SceneRow, checkId: string, golden: Img, snap: Img) {
+  if (checksActive < CHECKS_PARALLEL) checksActive++;
+  else await new Promise<void>((go) => checksWaiting.push(go));
+  try {
+    await compareWithGolden(scene, checkId, golden, snap);
+  } finally {
+    // Hand the slot straight to the next check, so a new one can't slip in ahead of the queue.
+    const next = checksWaiting.shift();
+    if (next) next();
+    else checksActive--;
+  }
+}
+
+async function compareWithGolden(scene: SceneRow, checkId: string, golden: Img, snap: Img) {
   const ctx = { sceneId: scene.id, checkId };
   try {
     const items = listItems(scene.id);
@@ -61,8 +80,9 @@ export async function runCheck(scene: SceneRow, checkId: string, golden: Img, sn
 
     const found = items.map((_, n) => counts[n].map((d) => toUnit(d.box, snap)));
     const goldenBoxes = items.map((item) => JSON.parse(item.boxes_json));
+    const ignoredBoxes = items.map((item) => (item.ignored_json ? JSON.parse(item.ignored_json) : []));
     const alignment = align(
-      items.flatMap((_, n) => matchPairs(goldenBoxes[n], found[n])),
+      items.flatMap((_, n) => matchPairs(goldenBoxes[n], notIgnored(found[n], ignoredBoxes[n]))),
       { framing: compare.framing, hint: compare.framing_hint },
     );
     if (alignment.level === "far_off") {
@@ -71,7 +91,7 @@ export async function runCheck(scene: SceneRow, checkId: string, golden: Img, sn
     const framing = { toGolden: toGolden(alignment), outside: outsideGolden(alignment) };
 
     const itemResults = items.map((item, n) =>
-      itemResult({ id: item.id, name: item.name, expected: item.expected_count, goldenBoxes: goldenBoxes[n], positionMatters: !!item.position_matters }, found[n], framing),
+      itemResult({ id: item.id, name: item.name, expected: item.expected_count, goldenBoxes: goldenBoxes[n], ignoredBoxes: ignoredBoxes[n], positionMatters: !!item.position_matters }, found[n], framing),
     );
 
     const ids = new Set(items.map((i) => i.id));
@@ -108,7 +128,10 @@ async function secondOpinion(ctx: { sceneId: string; checkId: string }, golden: 
   const rules = (result.checklist ?? []).filter((r) => r.status === "needs_review");
   if (!findings.length && !rules.length) return;
   const points = [
-    ...findings.map((f) => `${f.id}: finding (${f.kind.replace("_", " ")}): ${f.text}${at(f.boxes[0])}`),
+    // A missing item's box is where it is on GOLDEN; look around the same spot on NEW.
+    ...findings.map((f) => f.kind === "item_missing"
+      ? `${f.id}: finding (item missing): ${f.text}. It was${at(f.goldenBoxes[0])} on GOLDEN; check whether it is still there on NEW`
+      : `${f.id}: finding (${f.kind.replace("_", " ")}): ${f.text}${at(f.boxes[0])}`),
     ...rules.map((r) => `${r.ruleId}: checklist rule should be true: "${r.text}". First model: ${r.note}${at(r.box)}`),
   ];
   try {

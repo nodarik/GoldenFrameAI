@@ -13,6 +13,11 @@ db.exec(`
 CREATE TABLE IF NOT EXISTS video_checklists (
   scene_id TEXT PRIMARY KEY REFERENCES scenes(id) ON DELETE CASCADE, rules_json TEXT NOT NULL DEFAULT '[]'
 );
+-- Changing the checklist makes earlier checks outdated (see setup_version in db.ts).
+CREATE TRIGGER IF NOT EXISTS setup_rules_added AFTER INSERT ON video_checklists
+  BEGIN UPDATE scenes SET setup_version = setup_version + 1 WHERE id = NEW.scene_id; END;
+CREATE TRIGGER IF NOT EXISTS setup_rules_changed AFTER UPDATE ON video_checklists WHEN OLD.rules_json IS NOT NEW.rules_json
+  BEGIN UPDATE scenes SET setup_version = setup_version + 1 WHERE id = NEW.scene_id; END;
 `);
 
 export const DEFAULT_SECTION = "General";
