@@ -1,0 +1,18 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# deps and builds
+node_modules/
+dist/
+
+# local data and test photos (real property photos stay private)
+data/
+spike/*.jpg
+spike/*.jpeg
+spike/*.png
+spike/*.heic
+spike/out/
+
+.DS_Store

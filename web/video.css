@@ -1,0 +1,36 @@
+/* Video inspections section. Colours and base components come from styles.css. */
+.vtabs { display: flex; gap: 4px; margin-right: auto; margin-left: 16px; }
+.vtabs a { padding: 5px 12px; border-radius: 999px; color: var(--muted); font-size: 14px; white-space: nowrap; }
+.vtabs a:hover { background: var(--surface-2); }
+.vtabs a.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
+@media (max-width: 640px) { .vtabs { margin-left: 0; } .vtabs a { padding: 5px 8px; } }
+
+.area-pick { border: 0; padding: 0; margin: 12px 0 0; display: grid; gap: 8px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.area-pick legend { padding: 0; margin-bottom: 6px; }
+.area-pick label { display: flex; gap: 8px; align-items: center; border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 8px; cursor: pointer; }
+.area-pick label:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); }
+.area-pick img { width: 56px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 4px; flex: none; }
+
+.progress { height: 6px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin-top: 10px; }
+.progress > div { height: 100%; background: var(--accent); transition: width 0.2s; }
+
+.checklists { display: grid; gap: 12px; margin-top: 12px; }
+.checklist-area { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 16px; align-items: start; }
+.checklist-area img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius); background: var(--surface-2); }
+@media (max-width: 640px) { .checklist-area { grid-template-columns: 1fr; } }
+.rule-edit { margin-top: 6px; }
+
+.player { display: block; width: 100%; max-height: 420px; background: #000; border-radius: var(--radius); margin-bottom: 4px; }
+
+.area-section { margin-top: 16px; display: grid; gap: 10px; }
+.area-section h3 { font-size: 14px; font-weight: 600; margin: 0 0 4px; }
+.area-section p { margin: 0; }
+.report-lists { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 900px) { .report-lists { grid-template-columns: 1fr; } }
+
+.rule { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); }
+.rule:first-of-type { border-top: 0; }
+.rule-icon { font-weight: 700; text-align: center; }
+.rule-pass .rule-icon { color: var(--success); }
+.rule-fail .rule-icon { color: var(--danger); }
+.rule-needs_review .rule-icon { color: var(--warning); }

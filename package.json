@@ -1,0 +1,40 @@
+{
+  "name": "goldenframe",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Give any photo or camera a standard. Get events.",
+  "license": "MIT",
+  "scripts": {
+    "dev": "concurrently -k -n api,web \"tsx watch --env-file=.env server/index.ts\" \"vite\"",
+    "build": "vite build",
+    "start": "tsx --env-file-if-exists=.env server/index.ts",
+    "spike": "tsx --env-file=.env scripts/spike.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.5",
+    "@meta-sam/parser": "^0.1.0",
+    "hono": "^4.13.14",
+    "openai": "^4.104.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "sharp": "^0.34.4",
+    "ulid": "^3.0.2",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "concurrently": "^10.0.6",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vite": "^8.3.5"
+  },
+  "allowScripts": {
+    "sharp@0.34.5": true,
+    "esbuild@0.28.2": true
+  }
+}
