@@ -5,14 +5,12 @@ import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
 import { z } from "zod";
+import { type RuleResult, getChecklist } from "../checklist.js";
 import { type CheckRow, type SceneRow, db, getScene } from "../db.js";
 import { nowIso } from "../ids.js";
-import { bus } from "../runlog.js";
-import { type AreaRow, type InspectionRow, type Rule, getChecklist, getInspection, listAreas, newVideoId, setChecklist } from "./db.js";
-import { emitRuleEvent, inspectionDir, runInspection } from "./pipeline.js";
-import { type RuleResult, reviewRule } from "./rules.js";
+import { type InspectionRow, getInspection, listAreas, newVideoId } from "./db.js";
+import { inspectionDir, runInspection } from "./pipeline.js";
 
 export const videoApp = new Hono();
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
@@ -29,7 +27,7 @@ const getCheck = (id: string) =>
 
 // The media URLs are the photo feature's routes (server/index.ts).
 const checkJson = (c: CheckJoined) => ({
-  id: c.id, status: c.status, costUsd: c.cost_usd,
+  id: c.id, status: c.status, reviewStatus: c.review_status, costUsd: c.cost_usd,
   score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
   snapshot: { url: `/media/snapshots/${c.snapshot_id}.jpg`, w: c.snapshot_w, h: c.snapshot_h },
   golden: { url: `/media/checks/${c.id}/golden.jpg`, w: c.golden_w, h: c.golden_h },
@@ -40,13 +38,14 @@ function inspectionJson(ins: InspectionRow, withAreas: boolean) {
   let ok = 0, total = 0, review = 0;
   const areas = listAreas(ins.id).map((a) => {
     const check = a.check_id ? getCheck(a.check_id) : undefined;
-    const checklist = JSON.parse(a.checklist_json) as RuleResult[];
-    const findings = check ? ((JSON.parse(check.result_json).findings ?? []) as { status: string }[]) : [];
+    const result = check ? JSON.parse(check.result_json) : {};
+    const checklist = (result.checklist ?? []) as RuleResult[];
+    const findings = (result.findings ?? []) as { status: string }[];
+    // score_total already counts checklist rules.
     if (check?.score_total) { ok += check.score_ok ?? 0; total += check.score_total; }
-    for (const r of checklist) { total++; if (r.status === "pass") ok++; }
     review += checklist.filter((r) => r.status === "needs_review").length + findings.filter((f) => f.status === "needs_review").length;
     return {
-      sceneId: a.scene_id, name: getScene(a.scene_id)?.name ?? "Deleted area", status: a.status, frameMs: a.frame_ms, note: a.note,
+      sceneId: a.scene_id, name: getScene(a.scene_id)?.name ?? "Deleted scene", status: a.status, frameMs: a.frame_ms, note: a.note,
       checklist, check: check ? checkJson(check) : null,
     };
   });
@@ -64,19 +63,6 @@ videoApp.get("/api/video/areas", (c) => {
   return c.json(scenes.map((s) => ({ id: s.id, name: s.name, golden: { url: goldenUrl(s), w: s.golden_w, h: s.golden_h }, checklist: getChecklist(s.id) })));
 });
 
-videoApp.put("/api/video/areas/:id/checklist", async (c) => {
-  const body = z
-    .object({ rules: z.array(z.object({ id: z.string().max(40).optional(), text: z.string().trim().min(1).max(200) })).max(20) })
-    .safeParse(await c.req.json().catch(() => null));
-  if (!body.success) return c.json({ error: "Up to 20 rules, each 1–200 characters." }, 400);
-  const scene = getScene(c.req.param("id"));
-  if (!scene) return c.json({ error: "Area not found." }, 404);
-  const known = new Set(getChecklist(scene.id).map((r) => r.id));
-  const rules: Rule[] = body.data.rules.map((r) => ({ id: r.id && known.has(r.id) ? r.id : newVideoId("rul"), text: r.text }));
-  setChecklist(scene.id, rules);
-  return c.json({ checklist: rules });
-});
-
 // ---------- inspections ----------
 videoApp.get("/api/video/inspections", (c) => {
   const rows = db.prepare("SELECT * FROM inspections ORDER BY created_at DESC LIMIT 100").all() as InspectionRow[];
@@ -87,9 +73,9 @@ videoApp.get("/api/video/inspections", (c) => {
 videoApp.post("/api/video/inspections", async (c) => {
   const q = z.object({ name: z.string().trim().min(1).max(80), sceneIds: z.string().min(1).max(2000) })
     .safeParse({ name: c.req.query("name"), sceneIds: c.req.query("sceneIds") });
-  if (!q.success) return c.json({ error: "Give the inspection a name and choose at least one area." }, 400);
+  if (!q.success) return c.json({ error: "Give the walkthrough a name and choose at least one scene." }, 400);
   const scenes = [...new Set(q.data.sceneIds.split(","))].slice(0, MAX_AREAS).map(getScene);
-  if (scenes.some((s) => !s?.golden_path)) return c.json({ error: "Every chosen area needs a golden photo." }, 400);
+  if (scenes.some((s) => !s?.golden_path)) return c.json({ error: "Every chosen scene needs a golden photo." }, 400);
   const type = (c.req.header("content-type") ?? "").split(";")[0].trim();
   if (!type.startsWith("video/")) return c.json({ error: "Choose a video file (MP4, MOV or WebM)." }, 400);
   if (Number(c.req.header("content-length") ?? 0) > MAX_VIDEO_BYTES) return c.json({ error: "Videos must be 200 MB or smaller." }, 413);
@@ -137,36 +123,7 @@ videoApp.delete("/api/video/inspections/:id", (c) => {
   return c.body(null, 204);
 });
 
-// A person settles a checklist rule that needs review. Photo findings are reviewed with POST /api/checks/:id/review.
-videoApp.post("/api/video/inspections/:id/review", async (c) => {
-  const body = z.object({ sceneId: z.string().max(40), ruleId: z.string().max(40), decision: z.enum(["confirm", "reject"]) })
-    .safeParse(await c.req.json().catch(() => null));
-  if (!body.success) return c.json({ error: "Send an area, a rule and confirm or reject." }, 400);
-  // Read after the last await so two reviews at once can't overwrite each other.
-  const id = c.req.param("id");
-  const area = db.prepare("SELECT * FROM inspection_areas WHERE inspection_id = ? AND scene_id = ?").get(id, body.data.sceneId) as AreaRow | undefined;
-  if (!area) return c.json({ error: "Area not found in this inspection." }, 404);
-  const rules = JSON.parse(area.checklist_json) as RuleResult[];
-  const i = rules.findIndex((r) => r.ruleId === body.data.ruleId && r.status === "needs_review");
-  if (i < 0) return c.json({ error: "That rule doesn't need review." }, 409);
-  rules[i] = reviewRule(rules[i], body.data.decision);
-  db.prepare("UPDATE inspection_areas SET checklist_json = ? WHERE inspection_id = ? AND scene_id = ?").run(JSON.stringify(rules), id, area.scene_id);
-  if (rules[i].status === "fail" && area.check_id) emitRuleEvent(area.scene_id, area.check_id, id, rules[i]);
-  bus.emit("inspection", { id });
-  return c.json(inspectionJson(getInspection(id)!, true));
-});
-
 // ---------- live updates and media ----------
-videoApp.get("/api/video/stream", (c) =>
-  streamSSE(c, async (stream) => {
-    const forward = (event: string) => (data: unknown) => void stream.writeSSE({ event, data: JSON.stringify(data) });
-    const handlers = ["inspection", "check"].map((e) => [e, forward(e)] as const);
-    for (const [e, h] of handlers) bus.on(e, h);
-    stream.onAbort(() => { for (const [e, h] of handlers) bus.off(e, h); });
-    while (!stream.aborted) await stream.sleep(25_000).then(() => stream.writeSSE({ event: "ping", data: "" }));
-  }),
-);
-
 // Supports Range requests so the player can seek.
 videoApp.get("/media/video/:id", (c) => {
   const ins = getInspection(c.req.param("id"));

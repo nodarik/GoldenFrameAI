@@ -1,5 +1,6 @@
 // Verification layer, outside the models: plain rules decide what is confirmed, what a person
 // must sign off, and what is dropped. SAM counts are the source of truth for tagged items.
+import type { RuleResult } from "./checklist.js";
 import { type Box, iou } from "./images.js";
 import type { MaskOutline } from "./meta.js";
 
@@ -11,11 +12,24 @@ export type Finding = {
   id: string; kind: FindingKind; text: string; itemId: string | null;
   boxes: Box[]; goldenBoxes: Box[]; mask: MaskOutline | null;
   source: "sam" | "spark" | "both"; status: FindingStatus; why: string;
+  // Set when the box shows something outside the golden photo's view: not compared, so not an issue.
+  outsideFrame?: boolean;
+  secondOpinion?: SecondOpinion;
 };
+
+// Muse Wonder's verdict on a point left for a person (see golden.ts).
+export type SecondOpinion = { verdict: "real" | "not_real" | "unsure"; note: string };
+
+// How the new photo relates to the golden one (align.ts): map new boxes into golden coordinates,
+// and tell whether a new box lies outside what the golden photo shows.
+export type Framing = { toGolden: (b: Box) => Box; outside: (b: Box) => boolean };
+export const SAME_FRAMING: Framing = { toGolden: (b) => b, outside: () => false };
 
 export type ItemResult = {
   itemId: string; name: string; expected: number; found: number;
   goldenBoxes: Box[]; boxes: Box[]; positionMatters: boolean; ok: boolean;
+  // Matches left out of the count because they're outside the golden photo's view.
+  outsideFrame: number;
 };
 
 export type SparkIssue = {
@@ -52,17 +66,25 @@ function match(golden: Box[], found: Box[]) {
   return { matched, unmatchedGolden: golden.filter((_, i) => !usedG.has(i)) };
 }
 
+// Golden/new box pairs of the same object, the anchors for the framing check.
+export const matchPairs = (golden: Box[], found: Box[]) =>
+  match(golden, found).matched.map((p) => ({ golden: golden[p.i], found: found[p.j] }));
+
 export const furthestMove = (golden: Box[], found: Box[]) => Math.max(0, ...match(golden, found).matched.map((p) => p.d));
 
-export function itemResult(item: { id: string; name: string; expected: number; goldenBoxes: Box[]; positionMatters: boolean }, found: Box[]): ItemResult {
-  const moved = item.positionMatters && found.length === item.expected && item.expected > 0 && furthestMove(item.goldenBoxes, found) > MOVE_DISTANCE;
+export function itemResult(
+  item: { id: string; name: string; expected: number; goldenBoxes: Box[]; positionMatters: boolean }, all: Box[], framing = SAME_FRAMING,
+): ItemResult {
+  const found = all.filter((b) => !framing.outside(b));
+  const moved = item.positionMatters && found.length === item.expected && item.expected > 0 &&
+    furthestMove(item.goldenBoxes, found.map(framing.toGolden)) > MOVE_DISTANCE;
   return {
     itemId: item.id, name: item.name, expected: item.expected, found: found.length, goldenBoxes: item.goldenBoxes, boxes: found,
-    positionMatters: item.positionMatters, ok: found.length === item.expected && !moved,
+    positionMatters: item.positionMatters, ok: found.length === item.expected && !moved, outsideFrame: all.length - found.length,
   };
 }
 
-export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => string): Finding[] {
+export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => string, framing = SAME_FRAMING): Finding[] {
   const findings: Finding[] = [];
   const used = new Set<number>();
   // Marks up to `max` matching Spark issues as covered by this item's finding (Spark may report
@@ -111,6 +133,14 @@ export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => s
     const text = neutral(s.text);
     if (!hasArea(box) || !text) return; // no evidence or nothing to say: drop
     const common = { id: newId(), text, itemId: s.itemId, boxes: [box], goldenBoxes: [], mask: s.mask, source: "spark" as const };
+    // Something at the edge of a differently framed photo was never in the golden photo: nothing to compare it with.
+    if (s.kind !== "missing" && framing.outside(box)) {
+      findings.push({
+        ...common, kind: s.kind === "moved" ? "item_moved" : s.kind, status: "rejected", outsideFrame: true,
+        why: "Outside the golden photo's view, so it can't be compared. Retake the photo framed like the golden one to check it.",
+      });
+      return;
+    }
     if (s.kind === "missing" || s.kind === "moved") {
       findings.push({
         ...common, kind: s.kind === "missing" ? "item_missing" : "item_moved", status: "needs_review",
@@ -128,9 +158,9 @@ export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => s
   return findings;
 }
 
-export function statusOf(sameView: boolean, findings: Finding[]): CheckStatus {
-  if (!sameView) return "retake";
-  if (findings.some((f) => f.status === "needs_review")) return "needs_review";
-  if (findings.some((f) => f.status === "confirmed")) return "issues";
+export function statusOf(retake: boolean, findings: Finding[], rules: RuleResult[] = []): CheckStatus {
+  if (retake) return "retake";
+  if (findings.some((f) => f.status === "needs_review") || rules.some((r) => r.status === "needs_review")) return "needs_review";
+  if (findings.some((f) => f.status === "confirmed") || rules.some((r) => r.status === "fail")) return "issues";
   return "ok";
 }

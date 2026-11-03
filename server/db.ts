@@ -5,7 +5,8 @@ import { env } from "./env.js";
 
 mkdirSync(env.DATA_DIR, { recursive: true });
 
-export const db = new DatabaseSync(join(env.DATA_DIR, "goldenframe.db"));
+// Wait up to 5 s for a lock instead of crashing when another process (a second dev server, a restart) holds it.
+export const db = new DatabaseSync(join(env.DATA_DIR, "goldenframe.db"), { timeout: 5000 });
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 
 // Schema from goldenframe-tech-spec.md §3. Tables for later days exist now so we never migrate during the hackathon.
@@ -67,8 +68,31 @@ UPDATE checks SET (golden_path, golden_w, golden_h) =
 `);
 }
 
+// Redesign columns: scene group and assignee, every outline of an item, and the human review of each check.
+const columnsOf = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+const addColumn = (table: string, column: string, type: string) => {
+  if (!columnsOf(table).includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+};
+addColumn("scenes", "group_name", "TEXT");
+addColumn("scenes", "assignee", "TEXT");
+addColumn("items", "masks_json", "TEXT");
+if (!columnsOf("checks").includes("review_status")) {
+  db.exec(`
+ALTER TABLE checks ADD COLUMN review_status TEXT NOT NULL DEFAULT 'needs_review';
+ALTER TABLE checks ADD COLUMN reviewed_at TEXT;
+UPDATE checks SET review_status = 'reviewed', reviewed_at = created_at WHERE status = 'ok';
+`);
+}
+db.exec(`
+CREATE TABLE IF NOT EXISTS check_reviews (
+  id INTEGER PRIMARY KEY, check_id TEXT NOT NULL REFERENCES checks(id) ON DELETE CASCADE,
+  action TEXT NOT NULL, note TEXT, by TEXT, at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS check_reviews_check ON check_reviews(check_id, id);
+`);
+
 export type SceneRow = {
-  id: string; name: string; type: "golden" | "monitor";
+  id: string; name: string; type: "golden" | "monitor"; group_name: string | null; assignee: string | null;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
   webhook_url: string | null; webhook_secret: string; ingest_token: string;
   rules_json: string; created_at: string;
@@ -77,7 +101,7 @@ export type SceneRow = {
 export type ItemRow = {
   id: string; scene_id: string; name: string; phrase: string; expected_count: number;
   boxes_json: string; tap_box_json: string; mask_svg: string | null;
-  phrase_matches: number; position_matters: number; created_at: string;
+  phrase_matches: number; position_matters: number; created_at: string; masks_json: string | null;
 };
 
 export type SnapshotRow = {
@@ -89,7 +113,10 @@ export type CheckRow = {
   id: string; snapshot_id: string; status: string; score_ok: number | null; score_total: number | null;
   result_json: string; overlay_path: string | null; review: string | null; cost_usd: number; created_at: string;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
+  review_status: "needs_review" | "reviewed"; reviewed_at: string | null;
 };
+
+export type ReviewRow = { id: number; check_id: string; action: string; note: string | null; by: string | null; at: string };
 
 export const getScene = (id: string) => db.prepare("SELECT * FROM scenes WHERE id = ?").get(id) as SceneRow | undefined;
 export const listItems = (sceneId: string) =>
