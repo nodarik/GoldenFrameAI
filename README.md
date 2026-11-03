@@ -132,7 +132,7 @@ The check runs exactly like an upload in the app and appears there for review. W
 curl -H "Authorization: Bearer $TOKEN" https://your-app.example/api/ingest/$SCENE_ID/checks/$CHECK_ID
 ```
 
-Webhook URLs must use https and may not point at private addresses. With `ACCESS_CODE` empty (local development) http and localhost are allowed too. Photo URLs in the JSON need an app login.
+Webhook URLs must use https and may not point at private addresses. Outside production (`NODE_ENV` other than `production`, as in `npm run dev`) http and localhost are allowed too. Photo URLs in the JSON need an app login.
 
 ## Project layout
 

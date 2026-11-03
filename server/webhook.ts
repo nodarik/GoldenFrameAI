@@ -1,7 +1,6 @@
 import { createHmac } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { BlockList } from "node:net";
-import { env } from "./env.js";
 
 // A public deploy must not post into its own network: loopback, private, link-local, CGNAT and Fly's private IPv6.
 const internal = new BlockList();
@@ -10,8 +9,8 @@ for (const [net, prefix] of [["0.0.0.0", 8], ["10.0.0.0", 8], ["100.64.0.0", 10]
 for (const [net, prefix] of [["::", 128], ["::1", 128], ["::ffff:0:0", 96], ["fc00::", 7], ["fe80::", 10]] as const)
   internal.addSubnet(net, prefix, "ipv6");
 
-// Without an access code the app is local development, where posting to localhost is the point.
-const local = () => !env.ACCESS_CODE;
+// Outside the production image (the Dockerfile sets NODE_ENV) posting to localhost is the point.
+const local = () => process.env.NODE_ENV !== "production";
 
 /** Why a webhook URL can't be used, or null when it can. */
 export function webhookProblem(raw: string): string | null {
