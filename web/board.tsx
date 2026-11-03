@@ -44,6 +44,7 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
                 <div className="column-head" title={col.hint}>
                   <span className="dot" /> {col.title} <span className="count">{list.length}</span>
                 </div>
+                <div className="column-sub">{col.hint}</div>
                 {list.length === 0 && <div className="column-empty">Empty</div>}
                 {list.map((s) => <SceneCard key={s.id} s={s} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />)}
               </section>

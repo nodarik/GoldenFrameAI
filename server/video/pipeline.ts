@@ -1,8 +1,8 @@
 // Video inspection: frames → pick the best frame per scene → the golden check on that frame
 // (the same check as a photo upload, checklist included).
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { type SceneRow, db, getScene } from "../db.js";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { type SceneRow, db, getScene, saveMedia } from "../db.js";
 import { env } from "../env.js";
 import { runCheck } from "../golden.js";
 import { newId, nowIso } from "../ids.js";
@@ -88,8 +88,7 @@ async function inspectArea(area: AreaRow, frames: string[], sheet: { img: Img; p
 function startCheck(scene: SceneRow, golden: Img, frame: Img): string {
   const snapshotId = newId("snp"), checkId = newId("chk"), now = nowIso();
   const rel = `scenes/${scene.id}/snapshots/${snapshotId}.jpg`;
-  mkdirSync(dirname(join(env.DATA_DIR, rel)), { recursive: true });
-  writeFileSync(join(env.DATA_DIR, rel), frame.buf);
+  saveMedia(rel, frame.buf);
   db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, 'checking')")
     .run(snapshotId, scene.id, now, now, rel, frame.w, frame.h);
   db.prepare("INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h) VALUES (?, ?, 'running', '{}', ?, ?, ?, ?)")

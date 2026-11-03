@@ -109,6 +109,31 @@ Video inspection
 
 Model output is never trusted on its own: `server/verify.ts` (findings), `server/checklist.ts` (rules) and `server/align.ts` (framing) turn it into confirmed, needs-review or dropped results with a reason for each.
 
+## API and webhooks
+
+Another system (a property-management tool, a camera, a script) can send inspection photos and get the results back as JSON. Open a scene, then **More actions → API & webhook** to see its token, set a webhook URL and copy the signing secret. Each scene has its own token, and it opens only that scene.
+
+Send a photo (JPEG, PNG or WebP, up to 15 MB):
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -F image=@photo.jpg https://your-app.example/api/ingest/$SCENE_ID
+# 202 {"checkId":"chk_…","snapshotId":"snp_…"}
+```
+
+The check runs exactly like an upload in the app and appears there for review. When it finishes, GoldenFrame POSTs to the webhook URL:
+
+```json
+{ "event": "check.finished", "check": { "id": "chk_…", "sceneId": "scn_…", "status": "issues", "score": { "ok": 4, "total": 5 }, "result": { "findings": [], "checklist": [], "summary": "…" } } }
+```
+
+`status` is `ok`, `issues`, `needs_review`, `retake` or `failed`. Verify a delivery by computing HMAC-SHA256 of the raw body with the signing secret and comparing it with the `X-GoldenFrame-Signature: sha256=<hex>` header. Deliveries are tried once, so a receiver that was down can fetch the result instead:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" https://your-app.example/api/ingest/$SCENE_ID/checks/$CHECK_ID
+```
+
+Webhook URLs must use https and may not point at private addresses. With `ACCESS_CODE` empty (local development) http and localhost are allowed too. Photo URLs in the JSON need an app login.
+
 ## Project layout
 
 ```

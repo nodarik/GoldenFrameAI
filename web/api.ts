@@ -20,6 +20,7 @@ export type SceneSummary = {
   itemCount: number; ruleCount: number; toReview: number; lastCheck: LastCheck | null;
 };
 export type Scene = { id: string; name: string; group: string; assignee: string; golden: Media | null; items: Item[]; checklist: Rule[] };
+export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string };
 
 export type SecondOpinion = { verdict: "real" | "not_real" | "unsure"; note: string };
 export type Finding = {
@@ -76,6 +77,32 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const post = <T>(path: string, body: unknown) => api<T>(path, { method: "POST", body: JSON.stringify(body) });
+
+// POST a FormData with upload progress (fetch can't report upload progress, so XHR is used).
+// onProgress receives 0-100 while the request body uploads.
+export function uploadForm<T>(path: string, form: FormData, onProgress?: (pct: number) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.onload = () => {
+      try {
+        const data = JSON.parse(xhr.responseText || "{}");
+        if (xhr.status >= 200 && xhr.status < 300) return resolve(data as T);
+        reject(new ApiError(typeof data.error === "string" ? data.error : `Request failed (${xhr.status})`, xhr.status));
+      } catch {
+        reject(new ApiError(`Request failed (${xhr.status})`, xhr.status));
+      }
+    };
+    xhr.onerror = () => reject(new ApiError("Upload failed. Check your connection and try again.", 0));
+    xhr.onabort = () => reject(new ApiError("Upload cancelled.", 0));
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(Math.min(99, Math.round((e.loaded / e.total) * 100)));
+      };
+    }
+    xhr.send(form);
+  });
+}
 
 // One shared connection to the server's live updates (run, check, event, inspection).
 let stream: EventSource | null = null;
