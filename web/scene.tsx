@@ -7,7 +7,7 @@ import { DeleteSceneDialog, Dialog, Menu, PersonIcon, SceneDialog } from "./boar
 import { InspectionDetail, ReviewPill, SourceIcon } from "./inspection.js";
 import { AnnotatedPhoto } from "./photo.js";
 
-export function ScenePage({ id, checkId, groups, onScenesChange }: { id: string; checkId: string | null; groups: string[]; onScenesChange: () => void }) {
+export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"edit" | "delete" | "integration" | null>(null);
@@ -42,7 +42,7 @@ export function ScenePage({ id, checkId, groups, onScenesChange }: { id: string;
       <GoldenPanel scene={scene} reload={load} onError={setError} />
 
       {dialog === "edit" && (
-        <SceneDialog scene={scene} groups={groups} onClose={() => setDialog(null)}
+        <SceneDialog scene={scene} groups={groups} assignees={assignees} onClose={() => setDialog(null)}
           onSaved={() => { setDialog(null); void load(); onScenesChange(); }} />
       )}
       {dialog === "delete" && (

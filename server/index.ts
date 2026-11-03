@@ -88,9 +88,13 @@ app.get("/api/scenes", (c) => {
     (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
       WHERE c.review_status = 'needs_review' GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
   );
+  const totals = new Map(
+    (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
+      GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
+  );
   return c.json(scenes.map((s) => ({
     ...sceneJson(s), itemCount: counts.get(s.id) ?? 0, ruleCount: getChecklist(s.id).length,
-    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0,
+    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0, checkCount: totals.get(s.id) ?? 0,
   })));
 });
 

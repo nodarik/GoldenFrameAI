@@ -56,6 +56,7 @@ function Shell() {
   useEffect(() => setMenuOpen(false), [page.name, page.name === "scene" ? page.id : null]);
 
   const groups = [...new Set((scenes ?? []).map((s) => s.group).filter(Boolean))].sort();
+  const assignees = [...new Set((scenes ?? []).map((s) => s.assignee).filter(Boolean))].sort();
   const toReview = (scenes ?? []).filter((s) => columnOf(s) === "review").length;
 
   return (
@@ -83,7 +84,7 @@ function Shell() {
       </aside>
       <main className="main">
         {page.name === "board" && <Board scenes={scenes} group={page.group} onChange={loadScenes} />}
-        {page.name === "scene" && <ScenePage id={page.id} checkId={page.checkId} groups={groups} onScenesChange={loadScenes} />}
+        {page.name === "scene" && <ScenePage id={page.id} checkId={page.checkId} groups={groups} assignees={assignees} onScenesChange={loadScenes} />}
         {page.name === "walkthroughs" && <Walkthroughs id={page.id} />}
         {page.name === "activity" && <Activity />}
         {page.name === "legacy-check" && <LegacyCheck id={page.id} />}
