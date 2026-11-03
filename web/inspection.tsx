@@ -24,12 +24,13 @@ type Decide = (kind: "finding" | "rule", id: string, decision: "confirm" | "reje
 type Tone = Shape["tone"];
 const toneOf = (s: string): Tone => (s === "confirmed" || s === "fail" ? "issue" : s === "needs_review" ? "review" : "ok");
 
-export function InspectionDetail({ id, onChanged }: { id: string; onChanged: () => void }) {
+export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onChanged: () => void; onDeleted?: (id: string) => void }) {
   const [check, setCheck] = useState<Check | null>(null);
   const [error, setError] = useState("");
   const [active, setActive] = useState<string | null>(null);
-  const load = useCallback(() => api<Check>(`/api/checks/${id}`).then(setCheck).catch((e) => setError(e.message)), [id]);
-  useEffect(() => void load(), [load]);
+  const [deleting, setDeleting] = useState(false);
+  const load = useCallback(() => api<Check>(`/api/checks/${id}`).then((c) => { setCheck(c); setError(""); }).catch((e) => { setCheck(null); setError(e.message); }), [id]);
+  useEffect(() => { setCheck(null); setError(""); setActive(null); void load(); }, [load]);
   useStream<{ id: string }>("check", (e) => e.id === id && void load());
 
   const act = async (path: string, body: object) => {
@@ -42,6 +43,22 @@ export function InspectionDetail({ id, onChanged }: { id: string; onChanged: () 
     }
   };
   const decide: Decide = (kind, targetId, decision) => void act(`/api/checks/${id}/decide`, { kind, id: targetId, decision });
+
+  const remove = async () => {
+    if (check?.status === "running") return setError("Wait until the check finishes.");
+    if (!confirm("Delete this inspection? Its photo and results will be gone.")) return;
+    setDeleting(true);
+    setError("");
+    try {
+      await api(`/api/checks/${id}`, { method: "DELETE" });
+      onChanged();
+      onDeleted?.(id);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   if (!check) return error ? <div className="banner error">{error}</div> : <p className="muted">Loading…</p>;
   const r = check.result;
@@ -103,6 +120,10 @@ export function InspectionDetail({ id, onChanged }: { id: string; onChanged: () 
             <span className="muted small">{passed} of {total} points</span>
           </div>
         )}
+        <button type="button" className="ghost danger sm" onClick={remove} disabled={deleting || check.status === "running"}
+          title={check.status === "running" ? "Wait until the check finishes." : "Delete this inspection"}>
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
       </div>
 
       {error && <div className="banner error" role="alert">{error}</div>}
@@ -178,6 +199,7 @@ function Section({ name, count, complete, collapsed, hint, children }: {
   return (
     <div className={`section-card${complete ? " complete" : ""}`}>
       <button className="section-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <span className="toggle" aria-hidden="true">{open ? "−" : "+"}</span>
         <span className="dot" /> {name} <span className="count">{count}</span>
       </button>
       {open && hint && <p className="muted small row-pad">{hint}</p>}

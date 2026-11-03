@@ -21,6 +21,7 @@ export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmpt
   frame?: UnitBox | null; busyAt?: { x: number; y: number } | null; caption?: ReactNode;
 }) {
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [missing, setMissing] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const maskId = useId();
   const current = hover?.id ?? active ?? null;
@@ -36,6 +37,18 @@ export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmpt
 
   const px = (b: UnitBox) => ({ x: b.left * media.w, y: b.top * media.h, width: (b.right - b.left) * media.w, height: (b.bottom - b.top) * media.h });
 
+  // The file is gone (an upload cut off by a restart): keep the photo's shape so the layout holds, and say so.
+  if (missing) {
+    return (
+      <figure className="aphoto">
+        {caption && <figcaption>{caption}</figcaption>}
+        <div className="aphoto-stage aphoto-missing" style={{ aspectRatio: `${media.w} / ${media.h}` }} role="img" aria-label={`${label} missing`}>
+          This photo didn't save. Upload it again.
+        </div>
+      </figure>
+    );
+  }
+
   return (
     <figure className="aphoto">
       {caption && <figcaption>{caption}</figcaption>}
@@ -48,7 +61,7 @@ export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmpt
           onEmptyClick((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
         }}
       >
-        <img src={media.url} alt={label} draggable={false} />
+        <img src={media.url} alt={label} draggable={false} onError={() => setMissing(true)} />
         <svg viewBox={`0 0 ${media.w} ${media.h}`} preserveAspectRatio="none" aria-hidden="true">
           <defs>
             <mask id={maskId}>

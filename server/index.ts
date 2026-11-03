@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -8,7 +8,7 @@ import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { DEFAULT_SECTION, MAX_RULES, type Rule, getChecklist, setChecklist } from "./checklist.js";
-import { type CheckRow, type ItemRow, type ReviewRow, type SceneRow, type SnapshotRow, db, getScene, listItems } from "./db.js";
+import { type CheckRow, type ItemRow, type ReviewRow, type SceneRow, type SnapshotRow, db, getScene, listItems, saveMedia } from "./db.js";
 import { env } from "./env.js";
 import { newId, newSecret, nowIso } from "./ids.js";
 import { type CheckResult, ReviewError, decide, failInterrupted, openFlags, runCheck, setReview } from "./golden.js";
@@ -18,6 +18,7 @@ import { SpendLimitError, bus, spentTodayUsd } from "./runlog.js";
 import { TapError, detectItems, recount, tapToItem } from "./setup.js";
 import { newVideoId } from "./video/db.js";
 import { videoApp } from "./video/routes.js";
+import { deliver, webhookProblem } from "./webhook.js";
 
 const app = new Hono();
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
@@ -32,7 +33,8 @@ const sameText = (a: string, b: string) => {
 const authed = (code: string | undefined) => !env.ACCESS_CODE || (!!code && sameText(code, env.ACCESS_CODE));
 
 app.use("/api/*", async (c, next) => {
-  if (c.req.path === "/api/login" || c.req.path === "/api/session") return next();
+  // Integrations sign in per scene with its ingest token instead (see /api/ingest).
+  if (c.req.path === "/api/login" || c.req.path === "/api/session" || c.req.path.startsWith("/api/ingest/")) return next();
   if (!authed(getCookie(c, COOKIE))) return c.json({ error: "Enter the access code." }, 401);
   return next();
 });
@@ -157,10 +159,9 @@ app.post("/api/scenes/:id/golden", async (c) => {
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const img = await readPhoto(await c.req.parseBody());
   if ("error" in img) return c.json({ error: img.error }, img.status);
-  mkdirSync(sceneDir(scene.id), { recursive: true });
   // A new file per upload: earlier checks keep pointing at the golden photo they were compared with.
   const rel = `scenes/${scene.id}/golden-${Date.now()}.jpg`;
-  writeFileSync(join(env.DATA_DIR, rel), img.buf);
+  saveMedia(rel, img.buf);
   // A new golden photo invalidates the items tapped on the old one.
   db.prepare("DELETE FROM items WHERE scene_id = ?").run(scene.id);
   db.prepare("UPDATE scenes SET golden_path = ?, golden_w = ?, golden_h = ? WHERE id = ?").run(rel, img.w, img.h, scene.id);
@@ -339,24 +340,29 @@ const checkJson = (c: CheckJoined, full: boolean) => {
   };
 };
 
-app.post("/api/scenes/:id/snapshots", async (c) => {
-  const scene = getScene(c.req.param("id"));
-  if (!scene) return c.json({ error: "Scene not found." }, 404);
+// Store the photo and start its check in the background; the UI follows it over /api/stream, integrations by webhook.
+async function startCheck(scene: SceneRow, body: Record<string, unknown>, source: "upload" | "ingest") {
   const golden = await goldenOf(scene);
-  if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
-  const img = await readPhoto(await c.req.parseBody());
-  if ("error" in img) return c.json({ error: img.error }, img.status);
+  if (!golden) return { error: "Upload the golden photo first.", status: 400 as const };
+  const img = await readPhoto(body);
+  if ("error" in img) return img;
 
   const snapshotId = newId("snp"), checkId = newId("chk"), now = nowIso();
   const rel = `scenes/${scene.id}/snapshots/${snapshotId}.jpg`;
-  mkdirSync(join(sceneDir(scene.id), "snapshots"), { recursive: true });
-  writeFileSync(join(env.DATA_DIR, rel), img.buf);
-  db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, 'checking')")
-    .run(snapshotId, scene.id, now, now, rel, img.w, img.h);
+  saveMedia(rel, img.buf);
+  db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'checking')")
+    .run(snapshotId, scene.id, source, now, now, rel, img.w, img.h);
   db.prepare("INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h) VALUES (?, ?, 'running', '{}', ?, ?, ?, ?)")
     .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h);
-  void runCheck(scene, checkId, golden, img); // runs in the background; the UI follows it over /api/stream
-  return c.json({ checkId, snapshotId }, 202);
+  void runCheck(scene, checkId, golden, img);
+  return { checkId, snapshotId };
+}
+
+app.post("/api/scenes/:id/snapshots", async (c) => {
+  const scene = getScene(c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const started = await startCheck(scene, await c.req.parseBody(), "upload");
+  return "error" in started ? c.json({ error: started.error }, started.status) : c.json(started, 202);
 });
 
 app.get("/api/scenes/:id/checks", (c) => {
@@ -369,6 +375,22 @@ app.get("/api/checks/:id", (c) => {
   const check = getCheck(c.req.param("id"));
   if (!check) return c.json({ error: "Check not found." }, 404);
   return c.json(checkJson(check, true));
+});
+
+app.delete("/api/checks/:id", (c) => {
+  const check = getCheck(c.req.param("id"));
+  if (!check) return c.json({ error: "Inspection not found." }, 404);
+  if (check.status === "running") return c.json({ error: "Wait until the check finishes." }, 409);
+  // A walkthrough frame is also an ordinary check: unlink it so the walkthrough entry stays without results.
+  db.prepare("UPDATE inspection_areas SET check_id = NULL WHERE check_id = ?").run(check.id);
+  const snap = db.prepare("SELECT * FROM snapshots WHERE id = ?").get(check.snapshot_id) as SnapshotRow | undefined;
+  try {
+    if (snap) rmSync(resolve(env.DATA_DIR, snap.path), { force: true });
+  } catch { /* file already gone */ }
+  // Deleting the snapshot cascades to the check and its review history.
+  db.prepare("DELETE FROM snapshots WHERE id = ?").run(check.snapshot_id);
+  bus.emit("check", { id: check.id, sceneId: check.scene_id, deleted: true });
+  return c.body(null, 204);
 });
 
 const Reviewer = z.string().trim().max(60).optional().transform((s) => s || null);
@@ -405,6 +427,63 @@ app.post("/api/checks/:id/review", async (c) => {
     return c.json({ error: f.error }, f.status);
   }
   return c.json(checkJson(getCheck(check.id)!, true));
+});
+
+// ---------- integrations: third parties send photos with a scene's ingest token and get results by webhook ----------
+const integrationJson = (s: SceneRow) => ({
+  ingestPath: `/api/ingest/${s.id}`, token: s.ingest_token, webhookUrl: s.webhook_url ?? "", webhookSecret: s.webhook_secret,
+});
+
+app.get("/api/scenes/:id/integration", (c) => {
+  const scene = getScene(c.req.param("id"));
+  return scene ? c.json(integrationJson(scene)) : c.json({ error: "Scene not found." }, 404);
+});
+
+app.put("/api/scenes/:id/integration", async (c) => {
+  const scene = getScene(c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const body = z.object({ webhookUrl: z.string().trim().max(500) }).safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ error: "Send a webhook URL of up to 500 characters, or an empty one to turn it off." }, 400);
+  const problem = body.data.webhookUrl && webhookProblem(body.data.webhookUrl);
+  if (problem) return c.json({ error: problem }, 400);
+  db.prepare("UPDATE scenes SET webhook_url = ? WHERE id = ?").run(body.data.webhookUrl || null, scene.id);
+  return c.json(integrationJson(getScene(scene.id)!));
+});
+
+// New token and secret; the old ones stop working at once.
+app.post("/api/scenes/:id/integration/rotate", (c) => {
+  const scene = getScene(c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  db.prepare("UPDATE scenes SET ingest_token = ?, webhook_secret = ? WHERE id = ?").run(newSecret(), newSecret(), scene.id);
+  return c.json(integrationJson(getScene(scene.id)!));
+});
+
+// A token only opens its own scene. Unknown scene and wrong token look the same, so ids can't be probed.
+const tokenScene = (sceneId: string, header: string | undefined) => {
+  const scene = getScene(sceneId);
+  const token = header?.match(/^Bearer\s+(\S+)$/i)?.[1];
+  return scene && token && sameText(token, scene.ingest_token) ? scene : null;
+};
+const BAD_TOKEN = { error: "Send the scene's ingest token as Authorization: Bearer <token>." };
+
+app.post("/api/ingest/:sceneId", async (c) => {
+  const scene = tokenScene(c.req.param("sceneId"), c.req.header("authorization"));
+  if (!scene) return c.json(BAD_TOKEN, 401);
+  const started = await startCheck(scene, await c.req.parseBody(), "ingest");
+  return "error" in started ? c.json({ error: started.error }, started.status) : c.json(started, 202);
+});
+
+app.get("/api/ingest/:sceneId/checks/:checkId", (c) => {
+  const scene = tokenScene(c.req.param("sceneId"), c.req.header("authorization"));
+  if (!scene) return c.json(BAD_TOKEN, 401);
+  const check = getCheck(c.req.param("checkId"));
+  if (!check || check.scene_id !== scene.id) return c.json({ error: "Check not found." }, 404);
+  return c.json(checkJson(check, true));
+});
+
+bus.on("finished", ({ id, sceneId }: { id: string; sceneId: string }) => {
+  const scene = getScene(sceneId), check = getCheck(id);
+  if (scene?.webhook_url && check) void deliver(scene.webhook_url, scene.webhook_secret, { event: "check.finished", check: checkJson(check, true) });
 });
 
 // ---------- run log and live updates ----------

@@ -1,9 +1,21 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { env } from "./env.js";
 
 mkdirSync(env.DATA_DIR, { recursive: true });
+
+// Save a media file under DATA_DIR before any row points at it. fsync + rename: a restart mid-write (a Fly deploy)
+// leaves the whole file or none, never the empty JPEG a plain writeFileSync left behind.
+export function saveMedia(rel: string, buf: Buffer) {
+  const file = join(env.DATA_DIR, rel), dir = dirname(file), tmp = `${file}.tmp`;
+  mkdirSync(dir, { recursive: true });
+  const fd = openSync(tmp, "w");
+  try { writeSync(fd, buf); fsyncSync(fd); } finally { closeSync(fd); }
+  renameSync(tmp, file);
+  const dfd = openSync(dir, "r");
+  try { fsyncSync(dfd); } finally { closeSync(dfd); }
+}
 
 // Wait up to 5 s for a lock instead of crashing when another process (a second dev server, a restart) holds it.
 export const db = new DatabaseSync(join(env.DATA_DIR, "goldenframe.db"), { timeout: 5000 });

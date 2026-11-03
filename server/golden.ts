@@ -171,6 +171,7 @@ function finish(checkId: string, sceneId: string, result: CheckResult, forced?: 
   for (const f of result.findings) if (f.status === "confirmed") emitFinding(sceneId, checkId, f);
   for (const r of rules) if (r.status === "fail") emitRule(sceneId, checkId, r);
   bus.emit("check", { id: checkId, sceneId, status });
+  bus.emit("finished", { id: checkId, sceneId }); // the scene's webhook, if it has one
 }
 
 // Events are what webhooks will deliver. Only confirmed findings and failed rules become events.
