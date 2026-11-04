@@ -16,7 +16,7 @@ export function ReviewPill({ c }: { c: Pick<CheckSummary, "reviewStatus" | "stat
 
 export function SourceIcon({ source }: { source: Source }) {
   return source.type === "video"
-    ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-label="Walkthrough video"><rect x="2" y="6" width="14" height="12" rx="2" /><path d="m16 10 6-3v10l-6-3z" /></svg>
+    ? <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-label="Video"><rect x="2" y="6" width="14" height="12" rx="2" /><path d="m16 10 6-3v10l-6-3z" /></svg>
     : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-label="Photo"><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>;
 }
 
@@ -29,8 +29,9 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
   const [error, setError] = useState("");
   const [active, setActive] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [watching, setWatching] = useState(false);
   const load = useCallback(() => api<Check>(`/api/checks/${id}`).then((c) => { setCheck(c); setError(""); }).catch((e) => { setCheck(null); setError(e.message); }), [id]);
-  useEffect(() => { setCheck(null); setError(""); setActive(null); void load(); }, [load]);
+  useEffect(() => { setCheck(null); setError(""); setActive(null); setWatching(false); void load(); }, [load]);
   useStream<{ id: string }>("check", (e) => e.id === id && void load());
 
   const act = async (path: string, body: object) => {
@@ -116,16 +117,23 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
       <div className="detail-head">
         <div>
           <div className="row">
-            <h3>{check.source.type === "video" ? `Walkthrough · ${check.source.inspectionName}` : "Photo inspection"}</h3>
+            <h3>{check.source.type === "video" ? `Video · ${check.source.inspectionName}` : "Photo inspection"}</h3>
             <ReviewPill c={check} />
           </div>
           <div className="muted small">
             {check.source.type === "photo" && Math.abs(Date.parse(check.createdAt) - Date.parse(check.takenAt)) > 60_000
               ? <>Taken {when(check.takenAt)} · uploaded {when(check.createdAt)}</> : when(check.createdAt)} · {STATUS_LABEL[check.status]}
+            {check.uploadedBy && <> · sent by {check.uploadedBy}</>}
             {check.source.type === "video" && check.source.frameMs !== null && (
-              <> · <a href={`#/walkthroughs/${check.source.inspectionId}`}>frame at {clock(check.source.frameMs)}</a></>
+              <> · frame at {clock(check.source.frameMs)} · <button type="button" className="link" aria-expanded={watching}
+                onClick={() => setWatching(!watching)}>{watching ? "Hide video" : "▶ Watch video"}</button></>
             )}
           </div>
+          {watching && check.source.type === "video" && (
+            // #t= starts the player at the frame; the media route supports Range requests, so seeking works.
+            <video className="frame-video" src={`/media/video/${check.source.inspectionId}#t=${(check.source.frameMs ?? 0) / 1000}`}
+              controls autoPlay muted playsInline preload="metadata" aria-label="Inspection video" />
+          )}
         </div>
         {done && total > 0 && check.status !== "retake" && (
           <div className="progress-box">
@@ -164,14 +172,15 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
 
       <div className="compare">
         <AnnotatedPhoto media={check.golden} label="Golden photo" caption="Golden" shapes={goldenShapes} active={active} onActive={setActive} />
-        <AnnotatedPhoto media={check.snapshot} label="Inspection photo" caption={check.source.type === "video" ? "Walkthrough frame" : "Inspection photo"}
+        <AnnotatedPhoto media={check.snapshot} label="Inspection photo" caption={check.source.type === "video" ? "Video frame" : "Inspection photo"}
           shapes={newShapes} active={active} onActive={setActive} frame={r.alignment?.frame && r.alignment.level !== "aligned" ? r.alignment.frame : null} />
       </div>
 
       {done && check.status !== "retake" && (
         <div className="sections">
           {items.length > 0 && (
-            <Section name="WATCHED OBJECTS" count={`${itemPassed}/${items.length}`} complete={itemPassed === items.length}>
+            <Section name="WATCHED OBJECTS" count={`${itemPassed}/${items.length}`} complete={itemPassed === items.length}
+              tone={itemPassed === items.length ? "ok" : itemPassed === 0 ? "issue" : "review"}>
               {items.map((i) => {
                 const f = countFinding(i.itemId);
                 const note = [f && f.status !== "confirmed" ? f.why : "", i.outsideFrame ? `${i.outsideFrame} more outside the golden view, not counted.` : ""]
@@ -185,27 +194,32 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
               })}
             </Section>
           )}
-          {[...sections].map(([name, list]) => (
-            <Section key={name} name={name} count={ratio(list, "pass")} complete={list.every((x) => x.status === "pass")}>
+          {[...sections].map(([name, list]) => {
+            const passed = list.filter((x) => x.status === "pass").length;
+            return (
+            <Section key={name} name={name} count={ratio(list, "pass")} complete={list.every((x) => x.status === "pass")}
+              tone={passed === list.length ? "ok" : passed === 0 ? "issue" : "review"}>
               {list.map((x) => (
                 <Row key={x.ruleId} id={`rule:${x.ruleId}`} {...row} state={x.status} text={x.text} note={`${x.note} ${x.why}`} opinion={x.secondOpinion}
                   onConfirm={() => decide("rule", x.ruleId, "confirm")} onReject={() => decide("rule", x.ruleId, "reject")}
                   confirmLabel="It failed" rejectLabel="It's fine" />
               ))}
             </Section>
-          ))}
-          <Section name="DIFFERENCES FROM GOLDEN" count={String(differences.length)} complete={differences.length === 0}>
+            );
+          })}
+          <Section name="DIFFERENCES FROM GOLDEN" count={String(differences.length)} complete={differences.length === 0}
+            tone={differences.length === 0 ? "ok" : "issue"}>
             {differences.length === 0 && <p className="muted small row-pad">Nothing else differs from the golden photo.</p>}
             {differences.map((f) => <FindingRow key={f.id} f={f} {...row} decide={decide} />)}
           </Section>
           {outside.length > 0 && (
-            <Section name="OUTSIDE THE GOLDEN VIEW" count={String(outside.length)} collapsed
+            <Section name="OUTSIDE THE GOLDEN VIEW" count={String(outside.length)} tone="muted"
               hint="These were never in the golden photo's frame, so they aren't compared. A person can still flag one.">
               {outside.map((f) => <FindingRow key={f.id} f={f} {...row} decide={decide} />)}
             </Section>
           )}
           {dismissed.length > 0 && (
-            <Section name="DISMISSED" count={String(dismissed.length)} collapsed>
+            <Section name="DISMISSED" count={String(dismissed.length)} tone="muted">
               {dismissed.map((f) => <FindingRow key={f.id} f={f} {...row} decide={decide} />)}
             </Section>
           )}
@@ -221,15 +235,19 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
   );
 }
 
-function Section({ name, count, complete, collapsed, hint, children }: {
-  name: string; count: string; complete?: boolean; collapsed?: boolean; hint?: string; children: ReactNode;
+// Sections start closed: the header's dot and count say how it went; open one to see its rows.
+function Section({ name, count, complete, hint, tone, children }: {
+  name: string; count: string; complete?: boolean; hint?: string;
+  tone?: "ok" | "review" | "issue" | "muted"; children: ReactNode;
 }) {
-  const [open, setOpen] = useState(!collapsed);
+  const [open, setOpen] = useState(false);
+  const dot = tone ?? (complete ? "ok" : "review");
+  const colour = dot === "ok" ? "var(--ok)" : dot === "review" ? "var(--review)" : dot === "issue" ? "var(--issue)" : "var(--muted)";
   return (
     <div className={`section-card${complete ? " complete" : ""}`}>
       <button className="section-head" onClick={() => setOpen(!open)} aria-expanded={open}>
         <span className="toggle" aria-hidden="true">{open ? "−" : "+"}</span>
-        <span className="dot" /> {name} <span className="count">{count}</span>
+        <span className="dot" style={{ "--c": colour } as React.CSSProperties} /> {name} <span className="count">{count}</span>
       </button>
       {open && hint && <p className="muted small row-pad">{hint}</p>}
       {open && children}
@@ -242,11 +260,11 @@ function Row({ id, active, onActive, state, text, note, opinion, onConfirm, onRe
   text: string; note?: string; opinion?: { verdict: string; note: string };
   onConfirm?: () => void; onReject?: () => void; confirmLabel?: string; rejectLabel?: string;
 }) {
-  const [changing, setChanging] = useState(false);
   const s = state === "confirmed" ? "fail" : state === "rejected" ? "pass" : state;
   const icon = s === "pass" ? "✓" : s === "fail" ? "✕" : "?";
   const label = s === "pass" ? "OK" : s === "fail" ? "Issue" : "Needs your decision";
   const decidable = !!onConfirm && !!onReject;
+  // Both answers stay visible; the current one is pressed, so a reviewer flips it with one click.
   return (
     <div className={`crow crow-${s}${active === id ? " is-lit" : ""}`} onMouseEnter={() => onActive(id)} onMouseLeave={() => onActive(null)}>
       <span className="crow-icon" aria-label={label}>{icon}</span>
@@ -254,15 +272,13 @@ function Row({ id, active, onActive, state, text, note, opinion, onConfirm, onRe
         <div className="crow-text">{text}</div>
         {note && <div className="muted small">{note}</div>}
         {opinion && <div className="opinion small"><b>✦ Wonder:</b> {opinion.verdict === "real" ? "looks real" : opinion.verdict === "not_real" ? "looks fine" : "unsure"}. {opinion.note}</div>}
-        {decidable && (s === "needs_review" || changing) && (
+        {decidable && (
           <div className="row decide">
-            <button className="sm danger-soft" onClick={() => { setChanging(false); onConfirm!(); }}>{confirmLabel}</button>
-            <button className="sm" onClick={() => { setChanging(false); onReject!(); }}>{rejectLabel}</button>
-            {changing && <button className="sm ghost" onClick={() => setChanging(false)}>Cancel</button>}
+            <button className="sm danger-soft" aria-pressed={s === "fail"} disabled={s === "fail"} onClick={onConfirm}>{confirmLabel}</button>
+            <button className="sm ok-soft" aria-pressed={s === "pass"} disabled={s === "pass"} onClick={onReject}>{rejectLabel}</button>
           </div>
         )}
       </div>
-      {decidable && s !== "needs_review" && !changing && <button className="link small" onClick={() => setChanging(true)}>Change</button>}
     </div>
   );
 }

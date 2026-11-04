@@ -3,8 +3,8 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Hono } from "hono";
-import { getCookie, setCookie } from "hono/cookie";
+import { type Context, Hono } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { DEFAULT_SECTION, MAX_RULES, type Rule, getChecklist, setChecklist } from "./checklist.js";
@@ -14,13 +14,16 @@ import { newId, newSecret, nowIso } from "./ids.js";
 import { type CheckResult, ReviewError, decide, failInterrupted, openFlags, runCheck, setReview } from "./golden.js";
 import { type Box, type Img, load, normalise, takenAt } from "./images.js";
 import { DRAFT_CHECKLIST, errorText, imagePart, json } from "./meta.js";
-import { SpendLimitError, bus, spentTodayUsd } from "./runlog.js";
+import { SpendLimitError, bus, spentTodayUsd, workspaceSpentUsd } from "./runlog.js";
 import { TapError, detectItems, recount, tapToItem } from "./setup.js";
-import { newVideoId } from "./video/db.js";
+import { frameOf, getInspection, newVideoId, pruneInspection } from "./video/db.js";
+import { inspectionJson, receiveVideo } from "./video/routes.js";
+import { type AppEnv, DEMO, GuestLimitError, access, createGuest, deleteWorkspace, expireGuests, guestByToken, guestExpiry,
+  pathInUse, sceneIn, workspaceOfInspection, workspaceOfScene } from "./workspaces.js";
 import { videoApp } from "./video/routes.js";
 import { deliver, webhookProblem } from "./webhook.js";
 
-const app = new Hono();
+const app = new Hono<AppEnv>();
 const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
 const sceneDir = (id: string) => join(env.DATA_DIR, "scenes", id);
 
@@ -32,21 +35,61 @@ const sameText = (a: string, b: string) => {
 };
 const authed = (code: string | undefined) => !env.ACCESS_CODE || (!!code && sameText(code, env.ACCESS_CODE));
 
+// A guest ("Try TrueScene") works in their own copy of the demo; the access code opens the demo itself, which is
+// the template every guest copy starts from. A guest cookie wins, so an admin can try the guest view too.
+const GUEST_COOKIE = "ts_guest";
+const accessOf = (c: Context<AppEnv>) =>
+  guestByToken(getCookie(c, GUEST_COOKIE)) ?? (authed(getCookie(c, COOKIE)) ? { ws: DEMO, guest: false } : null);
+const OPEN = new Set(["/api/login", "/api/session", "/api/guest"]);
+
 app.use("/api/*", async (c, next) => {
-  // Integrations sign in per scene with its ingest token instead (see /api/ingest).
-  if (c.req.path === "/api/login" || c.req.path === "/api/session" || c.req.path.startsWith("/api/ingest/")) return next();
-  if (!authed(getCookie(c, COOKIE))) return c.json({ error: "Enter the access code." }, 401);
+  // Integrations sign in per scene with its ingest token instead (see /api/ingest), upload links with theirs (/api/link).
+  if (OPEN.has(c.req.path) || c.req.path.startsWith("/api/ingest/") || c.req.path.startsWith("/api/link/")) return next();
+  const who = accessOf(c);
+  if (!who) return c.json({ error: "Enter the access code, or try TrueScene as a guest." }, 401);
+  c.set("access", who);
   return next();
 });
-app.use("/media/*", async (c, next) => (authed(getCookie(c, COOKIE)) ? next() : c.text("Unauthorized", 401)));
+app.use("/media/*", async (c, next) => {
+  const who = accessOf(c);
+  if (!who) return c.text("Unauthorized", 401);
+  c.set("access", who);
+  return next();
+});
 
-app.get("/api/session", (c) => c.json({ loginRequired: !!env.ACCESS_CODE, ok: authed(getCookie(c, COOKIE)) }));
+app.get("/api/session", (c) => {
+  const who = accessOf(c);
+  return c.json({
+    loginRequired: !!env.ACCESS_CODE, ok: !!who, guest: !!who?.guest,
+    ...(who?.guest ? { expiresAt: guestExpiry(who.ws) } : {}),
+  });
+});
 app.post("/api/login", async (c) => {
   const body = z.object({ code: z.string().max(200) }).safeParse(await c.req.json().catch(() => null));
   if (!body.success || !authed(body.data.code)) return c.json({ error: "That code isn't right." }, 401);
   setCookie(c, COOKIE, body.data.code, { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 60 * 60 * 24 * 14 });
+  deleteCookie(c, GUEST_COOKIE, { path: "/" });
   return c.json({ ok: true });
 });
+// One click, no account: a private copy of the demo scenes.
+app.post("/api/guest", (c) => {
+  try {
+    const { token } = createGuest();
+    setCookie(c, GUEST_COOKIE, token, { httpOnly: true, sameSite: "Lax", path: "/", maxAge: 60 * 60 * 24 * 30, secure: c.req.url.startsWith("https:") });
+    return c.json({ ok: true }, 201);
+  } catch (e) {
+    if (e instanceof GuestLimitError) return c.json({ error: e.message }, 429);
+    throw e;
+  }
+});
+// Leaving deletes the guest's workspace: without the cookie nobody could open it again.
+app.post("/api/guest/leave", (c) => {
+  const who = access(c);
+  if (who.guest) deleteWorkspace(who.ws);
+  deleteCookie(c, GUEST_COOKIE, { path: "/" });
+  return c.json({ ok: true });
+});
+const ownScene = (c: Context<AppEnv>, id: string | undefined) => sceneIn(access(c).ws, id);
 
 // ---------- serialisation ----------
 const itemJson = (i: ItemRow) => ({
@@ -71,7 +114,7 @@ function failure(e: unknown) {
 
 // ---------- scenes ----------
 app.get("/api/scenes", (c) => {
-  const scenes = db.prepare("SELECT * FROM scenes ORDER BY created_at DESC").all() as SceneRow[];
+  const scenes = db.prepare("SELECT * FROM scenes WHERE workspace_id = ? ORDER BY created_at DESC").all(access(c).ws) as SceneRow[];
   const counts = new Map(
     (db.prepare("SELECT scene_id, COUNT(*) AS n FROM items GROUP BY scene_id").all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
   );
@@ -93,9 +136,22 @@ app.get("/api/scenes", (c) => {
     (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
       GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
   );
+  // Photo vs video split: a check made from a video frame has a video_frames row, otherwise it's a photo upload.
+  const byType = new Map(
+    (db.prepare(`SELECT s.scene_id,
+        SUM(CASE WHEN vf.check_id IS NULL THEN 1 ELSE 0 END) AS photos,
+        SUM(CASE WHEN vf.check_id IS NOT NULL THEN 1 ELSE 0 END) AS videos,
+        SUM(CASE WHEN c.review_status = 'needs_review' AND vf.check_id IS NULL THEN 1 ELSE 0 END) AS photo_review,
+        SUM(CASE WHEN c.review_status = 'needs_review' AND vf.check_id IS NOT NULL THEN 1 ELSE 0 END) AS video_review
+      FROM checks c JOIN snapshots s ON s.id = c.snapshot_id LEFT JOIN video_frames vf ON vf.check_id = c.id
+      GROUP BY s.scene_id`).all() as { scene_id: string; photos: number; videos: number; photo_review: number; video_review: number }[])
+      .map((r) => [r.scene_id, r]),
+  );
   return c.json(scenes.map((s) => ({
     ...sceneJson(s), itemCount: counts.get(s.id) ?? 0, ruleCount: getChecklist(s.id).length,
     lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0, checkCount: totals.get(s.id) ?? 0,
+    photoCount: byType.get(s.id)?.photos ?? 0, videoCount: byType.get(s.id)?.videos ?? 0,
+    photoToReview: byType.get(s.id)?.photo_review ?? 0, videoToReview: byType.get(s.id)?.video_review ?? 0,
   })));
 });
 
@@ -116,15 +172,15 @@ app.post("/api/scenes", async (c) => {
   if (!body.success) return c.json({ error: "Give the scene a name (up to 80 characters); group and assignee up to 60." }, 400);
   const row = {
     id: newId("scn"), name: body.data.name, type: body.data.type, webhook_secret: newSecret(), ingest_token: newSecret(), created_at: nowIso(),
-    group_name: body.data.group || null, assignee: body.data.assignee || null,
+    group_name: body.data.group || null, assignee: body.data.assignee || null, workspace_id: access(c).ws,
   };
-  db.prepare(`INSERT INTO scenes (id, name, type, webhook_secret, ingest_token, created_at, group_name, assignee)
-    VALUES (:id, :name, :type, :webhook_secret, :ingest_token, :created_at, :group_name, :assignee)`).run(row);
+  db.prepare(`INSERT INTO scenes (id, name, type, webhook_secret, ingest_token, created_at, group_name, assignee, workspace_id)
+    VALUES (:id, :name, :type, :webhook_secret, :ingest_token, :created_at, :group_name, :assignee, :workspace_id)`).run(row);
   return c.json(sceneJson(getScene(row.id)!), 201);
 });
 
 app.put("/api/scenes/:id", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const body = SceneFields.safeParse(await c.req.json().catch(() => null));
   if (!body.success) return c.json({ error: "Give the scene a name (up to 80 characters); group and assignee up to 60." }, 400);
@@ -134,16 +190,21 @@ app.put("/api/scenes/:id", async (c) => {
 });
 
 app.get("/api/scenes/:id", (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   return c.json({ ...sceneJson(scene), items: listItems(scene.id).map(itemJson), checklist: getChecklist(scene.id) });
 });
 
 app.delete("/api/scenes/:id", (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
+  // Videos of this scene: dropped below once none of their other scenes still use them.
+  const videos = db.prepare("SELECT inspection_id FROM video_frames WHERE scene_id = :id UNION SELECT inspection_id FROM inspection_areas WHERE scene_id = :id")
+    .all({ id: scene.id }) as { inspection_id: string }[];
   db.prepare("DELETE FROM scenes WHERE id = ?").run(scene.id);
-  rmSync(sceneDir(scene.id), { recursive: true, force: true });
+  // Guest copies of a demo scene point at its files; keep the folder while any of them does.
+  if (!pathInUse(join("scenes", scene.id))) rmSync(sceneDir(scene.id), { recursive: true, force: true });
+  for (const v of videos) pruneInspection(v.inspection_id);
   return c.body(null, 204);
 });
 
@@ -161,7 +222,7 @@ async function readPhoto(body: Record<string, unknown>): Promise<(Img & { takenA
 }
 
 app.post("/api/scenes/:id/golden", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const img = await readPhoto(await c.req.parseBody());
   if ("error" in img) return c.json({ error: img.error }, img.status);
@@ -184,7 +245,7 @@ const goldenOf = async (scene: SceneRow) => {
 
 // ---------- items ----------
 app.post("/api/scenes/:id/items/tap", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
   if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
@@ -202,7 +263,7 @@ app.post("/api/scenes/:id/items/tap", async (c) => {
 
 // Auto-detect: Spark lists the objects worth watching, SAM outlines and counts them. Adds to what's already watched.
 app.post("/api/scenes/:id/items/detect", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
   if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
@@ -218,8 +279,13 @@ app.post("/api/scenes/:id/items/detect", async (c) => {
 const UnitBox = z.object({ left: z.number(), top: z.number(), right: z.number(), bottom: z.number() })
   .refine((b) => b.left >= 0 && b.top >= 0 && b.right <= 1 && b.bottom <= 1 && b.right - b.left >= 0.01 && b.bottom - b.top >= 0.01);
 
+const ownItem = (c: Context<AppEnv>, id: string) => {
+  const item = db.prepare("SELECT * FROM items WHERE id = ?").get(id) as ItemRow | undefined;
+  return item && ownScene(c, item.scene_id) ? item : undefined;
+};
+
 app.put("/api/items/:id", async (c) => {
-  const item = db.prepare("SELECT * FROM items WHERE id = ?").get(c.req.param("id")) as ItemRow | undefined;
+  const item = ownItem(c, c.req.param("id"));
   if (!item) return c.json({ error: "Item not found." }, 404);
   const body = z
     .object({
@@ -285,6 +351,7 @@ app.put("/api/items/:id", async (c) => {
 });
 
 app.delete("/api/items/:id", (c) => {
+  if (!ownItem(c, c.req.param("id"))) return c.body(null, 204);
   db.prepare("DELETE FROM items WHERE id = ?").run(c.req.param("id"));
   return c.body(null, 204);
 });
@@ -306,7 +373,7 @@ const saveRules = (sceneId: string, rules: z.infer<typeof RulesBody>["rules"]) =
 };
 
 app.put("/api/scenes/:id/checklist", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const body = RulesBody.safeParse(await c.req.json().catch(() => null));
   if (!body.success) return c.json({ error: `Up to ${MAX_RULES} rules, each 1–200 characters; section names up to 60.` }, 400);
@@ -317,7 +384,7 @@ const Draft = z.object({ sections: z.array(z.object({ name: z.string().max(60), 
 
 // Muse Wonder drafts sections of rules from the golden photo; they're added after the existing rules.
 app.post("/api/scenes/:id/checklist/draft", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
   if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
@@ -353,16 +420,21 @@ app.post("/api/scenes/:id/checklist/draft", async (c) => {
 // ---------- checks: compare a new photo with the golden one ----------
 type CheckJoined = CheckRow & {
   scene_id: string; snapshot_path: string; snapshot_w: number; snapshot_h: number; captured_at: string; scene_setup_version: number;
+  uploaded_by: string | null;
+  workspace_id: string;
 };
-const CHECK_SELECT = `SELECT c.*, s.scene_id, s.path AS snapshot_path, s.w AS snapshot_w, s.h AS snapshot_h, s.captured_at,
-  sc.setup_version AS scene_setup_version
+const CHECK_SELECT = `SELECT c.*, s.scene_id, s.path AS snapshot_path, s.w AS snapshot_w, s.h AS snapshot_h, s.captured_at, s.uploaded_by,
+  sc.setup_version AS scene_setup_version, sc.workspace_id
   FROM checks c JOIN snapshots s ON s.id = c.snapshot_id JOIN scenes sc ON sc.id = s.scene_id`;
 const getCheck = (id: string) => db.prepare(`${CHECK_SELECT} WHERE c.id = ?`).get(id) as CheckJoined | undefined;
+const ownCheck = (c: Context<AppEnv>, id: string | undefined) => {
+  const check = id ? getCheck(id) : undefined;
+  return check && check.workspace_id === access(c).ws ? check : undefined;
+};
 
-// A check either came from a photo upload or is the frame a video inspection picked for this scene.
+// A check either came from a photo upload or is a frame a video inspection picked for this scene.
 const sourceOf = (checkId: string) => {
-  const v = db.prepare(`SELECT a.inspection_id, a.frame_ms, i.name FROM inspection_areas a JOIN inspections i ON i.id = a.inspection_id
-    WHERE a.check_id = ?`).get(checkId) as { inspection_id: string; frame_ms: number | null; name: string } | undefined;
+  const v = frameOf(checkId);
   return v ? { type: "video" as const, inspectionId: v.inspection_id, inspectionName: v.name, frameMs: v.frame_ms } : { type: "photo" as const };
 };
 
@@ -370,7 +442,7 @@ const checkJson = (c: CheckJoined, full: boolean) => {
   const result = JSON.parse(c.result_json);
   return {
     id: c.id, sceneId: c.scene_id, status: c.status, createdAt: c.created_at, takenAt: c.captured_at, costUsd: c.cost_usd,
-    reviewStatus: c.review_status, reviewedAt: c.reviewed_at, ...tallyOf(result), source: sourceOf(c.id),
+    reviewStatus: c.review_status, reviewedAt: c.reviewed_at, ...tallyOf(result), source: sourceOf(c.id), uploadedBy: c.uploaded_by,
     // The golden photo, watched items or checklist changed after this check ran.
     outdated: c.status !== "running" && c.setup_version < c.scene_setup_version,
     score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
@@ -384,19 +456,20 @@ const checkJson = (c: CheckJoined, full: boolean) => {
 };
 
 // Store the photo and start its check in the background; the UI follows it over /api/stream, integrations by webhook.
-async function startCheck(scene: SceneRow, body: Record<string, unknown>, source: "upload" | "ingest") {
+type Photo = Img & { takenAt: string | null };
+async function startCheck(scene: SceneRow, photo: Photo | { error: string; status: 400 | 413 }, source: "upload" | "ingest", by: string | null = null) {
   const golden = await goldenOf(scene);
   if (!golden) return { error: "Upload the golden photo first.", status: 400 as const };
-  const img = await readPhoto(body);
-  if ("error" in img) return img;
+  if ("error" in photo) return photo;
+  const img = photo;
 
   const snapshotId = newId("snp"), checkId = newId("chk"), now = nowIso();
   // Inspections sort by when the photo was taken; a camera clock set in the future counts as now.
   const captured = img.takenAt && img.takenAt < now ? img.takenAt : now;
   const rel = `scenes/${scene.id}/snapshots/${snapshotId}.jpg`;
   saveMedia(rel, img.buf);
-  db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'checking')")
-    .run(snapshotId, scene.id, source, captured, now, rel, img.w, img.h);
+  db.prepare("INSERT INTO snapshots (id, scene_id, source, captured_at, received_at, path, w, h, status, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'checking', ?)")
+    .run(snapshotId, scene.id, source, captured, now, rel, img.w, img.h, by);
   db.prepare(`INSERT INTO checks (id, snapshot_id, status, result_json, created_at, golden_path, golden_w, golden_h, setup_version)
     VALUES (?, ?, 'running', '{}', ?, ?, ?, ?, (SELECT setup_version FROM scenes WHERE id = ?))`)
     .run(checkId, snapshotId, now, scene.golden_path, golden.w, golden.h, scene.id);
@@ -430,36 +503,41 @@ async function recheck(check: CheckJoined, by: string | null) {
 }
 
 app.post("/api/scenes/:id/snapshots", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
-  const started = await startCheck(scene, await c.req.parseBody(), "upload");
+  const started = await startCheck(scene, await readPhoto(await c.req.parseBody()), "upload");
   return "error" in started ? c.json({ error: started.error }, started.status) : c.json(started, 202);
 });
 
 app.get("/api/scenes/:id/checks", (c) => {
+  if (!ownScene(c, c.req.param("id"))) return c.json({ error: "Scene not found." }, 404);
   const limit = Math.min(Number(c.req.query("limit") ?? 50) || 50, 200);
   const rows = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? ORDER BY s.captured_at DESC, c.created_at DESC LIMIT ?`).all(c.req.param("id"), limit) as CheckJoined[];
   return c.json(rows.map((r) => checkJson(r, false)));
 });
 
 app.get("/api/checks/:id", (c) => {
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   if (!check) return c.json({ error: "Check not found." }, 404);
   return c.json(checkJson(check, true));
 });
 
 app.delete("/api/checks/:id", (c) => {
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   if (!check) return c.json({ error: "Inspection not found." }, 404);
   if (check.status === "running") return c.json({ error: "Wait until the check finishes." }, 409);
-  // A walkthrough frame is also an ordinary check: unlink it so the walkthrough entry stays without results.
-  db.prepare("UPDATE inspection_areas SET check_id = NULL WHERE check_id = ?").run(check.id);
+  const video = frameOf(check.id);
   const snap = db.prepare("SELECT * FROM snapshots WHERE id = ?").get(check.snapshot_id) as SnapshotRow | undefined;
   try {
-    if (snap) rmSync(resolve(env.DATA_DIR, snap.path), { force: true });
+    // A demo photo is shared with guest copies of the inspection: only the last one removes the file.
+    if (snap && !db.prepare("SELECT 1 FROM snapshots WHERE path = ? AND id != ?").get(snap.path, snap.id)) {
+      rmSync(resolve(env.DATA_DIR, snap.path), { force: true });
+    }
   } catch { /* file already gone */ }
   // Deleting the snapshot cascades to the check and its review history.
   db.prepare("DELETE FROM snapshots WHERE id = ?").run(check.snapshot_id);
+  // The last inspection made from a video takes the video with it.
+  if (video) pruneInspection(video.inspection_id);
   bus.emit("check", { id: check.id, sceneId: check.scene_id, deleted: true });
   return c.body(null, 204);
 });
@@ -467,7 +545,7 @@ app.delete("/api/checks/:id", (c) => {
 const Reviewer = z.string().trim().max(60).optional().transform((s) => s || null);
 
 app.post("/api/checks/:id/recheck", async (c) => {
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   if (!check) return c.json({ error: "Inspection not found." }, 404);
   const by = Reviewer.safeParse((await c.req.json().catch(() => ({})))?.by);
   const done = await recheck(check, by.success ? by.data : null);
@@ -476,7 +554,7 @@ app.post("/api/checks/:id/recheck", async (c) => {
 
 // Every finished inspection of the scene that ran against an older setup. They queue like a batch of uploads.
 app.post("/api/scenes/:id/recheck", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const by = Reviewer.safeParse((await c.req.json().catch(() => ({})))?.by);
   const outdated = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? AND c.status != 'running' AND c.setup_version < sc.setup_version`)
@@ -493,7 +571,7 @@ app.post("/api/checks/:id/decide", async (c) => {
   if (!body.success) return c.json({ error: "Send a finding or rule id and confirm or reject." }, 400);
   // Read after the last await: decide() then reads and writes result_json with nothing in between,
   // so two decisions at once can't overwrite each other.
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   if (!check) return c.json({ error: "Check not found." }, 404);
   try {
     decide(check, { kind: body.data.kind, id: body.data.id }, body.data.decision, body.data.by);
@@ -509,7 +587,7 @@ app.post("/api/checks/:id/review", async (c) => {
   const body = z.object({ status: z.enum(["needs_review", "reviewed"]), note: z.string().trim().max(500).optional(), by: Reviewer })
     .safeParse(await c.req.json().catch(() => null));
   if (!body.success) return c.json({ error: "Choose Needs review or Reviewed; notes up to 500 characters." }, 400);
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   if (!check) return c.json({ error: "Check not found." }, 404);
   try {
     setReview(check, body.data.status, body.data.note || null, body.data.by);
@@ -523,15 +601,16 @@ app.post("/api/checks/:id/review", async (c) => {
 // ---------- integrations: third parties send photos with a scene's ingest token and get results by webhook ----------
 const integrationJson = (s: SceneRow) => ({
   ingestPath: `/api/ingest/${s.id}`, token: s.ingest_token, webhookUrl: s.webhook_url ?? "", webhookSecret: s.webhook_secret,
+  uploadLinkPath: s.upload_link_token ? `/u/${s.upload_link_token}` : null,
 });
 
 app.get("/api/scenes/:id/integration", (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   return scene ? c.json(integrationJson(scene)) : c.json({ error: "Scene not found." }, 404);
 });
 
 app.put("/api/scenes/:id/integration", async (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const body = z.object({ webhookUrl: z.string().trim().max(500) }).safeParse(await c.req.json().catch(() => null));
   if (!body.success) return c.json({ error: "Send a webhook URL of up to 500 characters, or an empty one to turn it off." }, 400);
@@ -543,9 +622,23 @@ app.put("/api/scenes/:id/integration", async (c) => {
 
 // New token and secret; the old ones stop working at once.
 app.post("/api/scenes/:id/integration/rotate", (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   db.prepare("UPDATE scenes SET ingest_token = ?, webhook_secret = ? WHERE id = ?").run(newSecret(), newSecret(), scene.id);
+  return c.json(integrationJson(getScene(scene.id)!));
+});
+
+// The upload link for people: turning it on (again) makes a new address, so a forwarded old one stops working.
+app.post("/api/scenes/:id/integration/link", (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  db.prepare("UPDATE scenes SET upload_link_token = ? WHERE id = ?").run(newSecret(), scene.id);
+  return c.json(integrationJson(getScene(scene.id)!));
+});
+app.delete("/api/scenes/:id/integration/link", (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  db.prepare("UPDATE scenes SET upload_link_token = NULL WHERE id = ?").run(scene.id);
   return c.json(integrationJson(getScene(scene.id)!));
 });
 
@@ -557,11 +650,84 @@ const tokenScene = (sceneId: string, header: string | undefined) => {
 };
 const BAD_TOKEN = { error: "Send the scene's ingest token as Authorization: Bearer <token>." };
 
+// One URL takes anything: a video or a photo as the raw body (its Content-Type says which), or a photo as the
+// multipart `image` field. Raw bodies suit tools that forward a file as it is (n8n, Zapier, iOS Shortcuts).
+// `?by=` names who sent it (shown on the inspection); `?name=` names a video.
+async function receiveFile(c: Context<AppEnv>, scene: SceneRow) {
+  const by = (c.req.query("by") ?? "").trim().slice(0, 60) || null;
+  const type = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (type.startsWith("video/")) {
+    const name = (c.req.query("name") ?? "").trim().slice(0, 80) || `Sent ${nowIso().slice(0, 16).replace("T", " ")}`;
+    const res = await receiveVideo(c, scene.workspace_id, name, [scene.id], by);
+    if (res.status !== 202) return res;
+    const { id } = (await res.json()) as { id: string };
+    return c.json({ videoId: id, statusPath: `/api/ingest/${scene.id}/videos/${id}` }, 202);
+  }
+  let photo;
+  if (type.startsWith("image/")) {
+    if (Number(c.req.header("content-length") ?? 0) > MAX_UPLOAD_BYTES) return c.json({ error: "Photos must be 15 MB or smaller." }, 413);
+    photo = await readPhoto({ image: new File([await c.req.arrayBuffer()], "photo", { type }) });
+  } else {
+    photo = await readPhoto(await c.req.parseBody());
+  }
+  const started = await startCheck(scene, photo, "ingest", by);
+  return "error" in started ? c.json({ error: started.error }, started.status) : c.json(started, 202);
+}
+
 app.post("/api/ingest/:sceneId", async (c) => {
   const scene = tokenScene(c.req.param("sceneId"), c.req.header("authorization"));
   if (!scene) return c.json(BAD_TOKEN, 401);
-  const started = await startCheck(scene, await c.req.parseBody(), "ingest");
-  return "error" in started ? c.json({ error: started.error }, started.status) : c.json(started, 202);
+  return receiveFile(c, scene);
+});
+
+// ---------- upload links: a public page (/u/<token>) where people send photos and videos to one scene ----------
+// They see the scene's name and golden photo, and only learn that a file arrived: results stay with the reviewers.
+const linkScene = (token: string) =>
+  db.prepare("SELECT * FROM scenes WHERE upload_link_token = ?").get(token) as SceneRow | undefined;
+const LINK_OFF = { error: "This upload link isn't active any more. Ask for a new one." };
+
+app.get("/api/link/:token", (c) => {
+  const scene = linkScene(c.req.param("token"));
+  if (!scene) return c.json(LINK_OFF, 404);
+  return c.json({ sceneName: scene.name, golden: scene.golden_path ? { w: scene.golden_w, h: scene.golden_h } : null });
+});
+
+app.get("/api/link/:token/golden.jpg", (c) => {
+  const scene = linkScene(c.req.param("token"));
+  if (!scene?.golden_path) return c.text("Not found", 404);
+  return c.body(readFileSync(goldenFile(scene.golden_path)), 200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=300" });
+});
+
+app.post("/api/link/:token", async (c) => {
+  const scene = linkScene(c.req.param("token"));
+  if (!scene) return c.json(LINK_OFF, 404);
+  const res = await receiveFile(c, scene);
+  return res.status === 202 ? c.json({ received: true }, 202) : res;
+});
+
+// A video as this scene sees it: still processing, not seen in the video, failed, or found (the checks it became).
+const videoForScene = (scene: SceneRow, id: string) => {
+  const ins = getInspection(id);
+  const view = ins && ins.workspace_id === scene.workspace_id ? inspectionJson(ins) : null;
+  const area = view?.scenes.find((s) => s.sceneId === scene.id);
+  return view && area ? { id: view.id, name: view.name, status: view.status, createdAt: view.createdAt, scene: area } : null;
+};
+
+app.get("/api/ingest/:sceneId/videos/:videoId", (c) => {
+  const scene = tokenScene(c.req.param("sceneId"), c.req.header("authorization"));
+  if (!scene) return c.json(BAD_TOKEN, 401);
+  const video = videoForScene(scene, c.req.param("videoId"));
+  return video ? c.json(video) : c.json({ error: "Video not found." }, 404);
+});
+
+// Each check a video becomes posts check.finished as usual; this also tells a scene when the video didn't show it.
+bus.on("videoFinished", ({ id }: { id: string }) => {
+  const ins = getInspection(id);
+  if (!ins) return;
+  for (const s of inspectionJson(ins).scenes) {
+    const scene = getScene(s.sceneId), video = scene?.webhook_url ? videoForScene(scene, id) : null;
+    if (scene?.webhook_url && video) void deliver(scene.webhook_url, scene.webhook_secret, { event: "video.finished", video });
+  }
 });
 
 app.get("/api/ingest/:sceneId/checks/:checkId", (c) => {
@@ -579,6 +745,7 @@ bus.on("finished", ({ id, sceneId }: { id: string; sceneId: string }) => {
 
 // ---------- run log and live updates ----------
 app.get("/api/scenes/:id/runs", (c) => {
+  if (!ownScene(c, c.req.param("id"))) return c.json({ error: "Scene not found." }, 404);
   const limit = Math.min(Number(c.req.query("limit") ?? 50) || 50, 200);
   const checkId = c.req.query("checkId");
   const rows = checkId
@@ -590,14 +757,26 @@ app.get("/api/scenes/:id/runs", (c) => {
 // Every model call across all scenes, newest first.
 app.get("/api/runs", (c) => {
   const limit = Math.min(Number(c.req.query("limit") ?? 100) || 100, 300);
-  return c.json(db.prepare(`SELECT r.*, s.name AS scene_name FROM runs r LEFT JOIN scenes s ON s.id = r.scene_id ORDER BY r.id DESC LIMIT ?`).all(limit));
+  return c.json(db.prepare(`SELECT r.*, s.name AS scene_name FROM runs r JOIN scenes s ON s.id = r.scene_id
+    WHERE s.workspace_id = ? ORDER BY r.id DESC LIMIT ?`).all(access(c).ws, limit));
 });
 
-app.get("/api/spend", (c) => c.json({ todayUsd: spentTodayUsd(), limitUsd: env.DAILY_SPEND_LIMIT_USD }));
+// A guest sees their own workspace's budget; the admin sees today's total across everyone.
+app.get("/api/spend", (c) => {
+  const who = access(c);
+  return c.json(who.guest
+    ? { todayUsd: workspaceSpentUsd(who.ws), limitUsd: env.GUEST_SPEND_LIMIT_USD, guest: true }
+    : { todayUsd: spentTodayUsd(), limitUsd: env.DAILY_SPEND_LIMIT_USD, guest: false });
+});
 
 app.get("/api/stream", (c) =>
   streamSSE(c, async (stream) => {
-    const forward = (event: string) => (data: unknown) => void stream.writeSSE({ event, data: JSON.stringify(data) });
+    // Only events about the asker's own workspace.
+    const ws = access(c).ws;
+    type Payload = { sceneId?: string; scene_id?: string | null; id?: string };
+    const mine = (event: string, data: Payload) =>
+      event === "inspection" && data.id ? workspaceOfInspection(data.id) === ws : workspaceOfScene(data.sceneId ?? data.scene_id) === ws;
+    const forward = (event: string) => (data: Payload) => void (mine(event, data) && stream.writeSSE({ event, data: JSON.stringify(data) }));
     const handlers = ["run", "check", "event", "inspection"].map((e) => [e, forward(e)] as const);
     for (const [e, h] of handlers) bus.on(e, h);
     stream.onAbort(() => { for (const [e, h] of handlers) bus.off(e, h); });
@@ -607,7 +786,7 @@ app.get("/api/stream", (c) =>
 
 // ---------- media and web app ----------
 app.get("/media/scenes/:id/golden.jpg", (c) => {
-  const scene = getScene(c.req.param("id"));
+  const scene = ownScene(c, c.req.param("id"));
   const file = scene?.golden_path ? goldenFile(scene.golden_path) : null;
   if (!file || !existsSync(file)) return c.text("Not found", 404);
   return c.body(readFileSync(file), 200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=3600" });
@@ -615,14 +794,15 @@ app.get("/media/scenes/:id/golden.jpg", (c) => {
 
 // The golden photo a check was compared with, which may no longer be the scene's current one.
 app.get("/media/checks/:id/golden.jpg", (c) => {
-  const check = getCheck(c.req.param("id"));
+  const check = ownCheck(c, c.req.param("id"));
   const file = check?.golden_path ? goldenFile(check.golden_path) : null;
   if (!file || !existsSync(file)) return c.text("Not found", 404);
   return c.body(readFileSync(file), 200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400" });
 });
 
 app.get("/media/snapshots/:file", (c) => {
-  const snap = db.prepare("SELECT * FROM snapshots WHERE id = ?").get(c.req.param("file").replace(/\.jpg$/, "")) as SnapshotRow | undefined;
+  const found = db.prepare("SELECT * FROM snapshots WHERE id = ?").get(c.req.param("file").replace(/\.jpg$/, "")) as SnapshotRow | undefined;
+  const snap = found && ownScene(c, found.scene_id) ? found : undefined;
   const file = snap ? resolve(env.DATA_DIR, snap.path) : null;
   if (!file || !existsSync(file)) return c.text("Not found", 404);
   return c.body(readFileSync(file), 200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=86400" });
@@ -639,4 +819,6 @@ if (existsSync("dist/web")) {
 }
 
 failInterrupted();
-serve({ fetch: app.fetch, port: env.API_PORT, hostname: "0.0.0.0" }, (info) => console.log(`GoldenFrame API on http://localhost:${info.port}`));
+expireGuests();
+setInterval(expireGuests, 3600_000).unref();
+serve({ fetch: app.fetch, port: env.API_PORT, hostname: "0.0.0.0" }, (info) => console.log(`TrueScene API on http://localhost:${info.port}`));

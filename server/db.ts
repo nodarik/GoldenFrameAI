@@ -21,6 +21,19 @@ export function saveMedia(rel: string, buf: Buffer) {
 export const db = new DatabaseSync(join(env.DATA_DIR, "goldenframe.db"), { timeout: 5000 });
 db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
 
+// Run fn atomically: all of its writes, or none if it throws.
+export function transaction<T>(fn: () => T): T {
+  db.exec("BEGIN");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+}
+
 // Schema from goldenframe-tech-spec.md §3. Tables for later days exist now so we never migrate during the hackathon.
 db.exec(`
 CREATE TABLE IF NOT EXISTS scenes (
@@ -81,8 +94,8 @@ UPDATE checks SET (golden_path, golden_w, golden_h) =
 }
 
 // Redesign columns: scene group and assignee, every outline of an item, and the human review of each check.
-const columnsOf = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
-const addColumn = (table: string, column: string, type: string) => {
+export const columnsOf = (table: string) => (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
+export const addColumn = (table: string, column: string, type: string) => {
   if (!columnsOf(table).includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 };
 addColumn("scenes", "group_name", "TEXT");
@@ -124,10 +137,17 @@ CREATE TRIGGER IF NOT EXISTS setup_item_changed AFTER UPDATE ON items
   BEGIN ${bumpSetup("NEW.scene_id")} END;
 `);
 
+// Every scene belongs to a workspace: "demo" (the template the access code opens) or a guest's copy (server/workspaces.ts).
+addColumn("scenes", "workspace_id", "TEXT NOT NULL DEFAULT 'demo'");
+// A scene's upload link (/u/<token>) for people without an account; NULL while it's turned off. And who sent each photo.
+addColumn("scenes", "upload_link_token", "TEXT");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS scenes_upload_link ON scenes (upload_link_token)");
+addColumn("snapshots", "uploaded_by", "TEXT");
+
 export type SceneRow = {
-  id: string; name: string; type: "golden" | "monitor"; group_name: string | null; assignee: string | null;
+  id: string; name: string; workspace_id: string; type: "golden" | "monitor"; group_name: string | null; assignee: string | null;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
-  webhook_url: string | null; webhook_secret: string; ingest_token: string;
+  webhook_url: string | null; webhook_secret: string; ingest_token: string; upload_link_token: string | null;
   rules_json: string; created_at: string; setup_version: number;
 };
 
@@ -139,7 +159,7 @@ export type ItemRow = {
 
 export type SnapshotRow = {
   id: string; scene_id: string; source: "upload" | "ingest" | "simulator" | "eval";
-  captured_at: string; received_at: string; path: string; w: number; h: number; status: string;
+  captured_at: string; received_at: string; path: string; w: number; h: number; status: string; uploaded_by: string | null;
 };
 
 export type CheckRow = {

@@ -2,10 +2,11 @@
 // inspection's checklist and review on the right), then the written checklist,
 // then the golden photo with everything we watch. Each section collapses.
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, api, ago, getReviewer, plural, post, uploadForm, useStream } from "./api.js";
+import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, type VideoNotice, api, ago, getReviewer, plural, post, uploadForm, uploadVideo, useStream } from "./api.js";
 import { DeleteSceneDialog, Dialog, Menu, PersonIcon, SceneDialog } from "./board.js";
 import { InspectionDetail, ReviewPill, SourceIcon } from "./inspection.js";
 import { AnnotatedPhoto } from "./photo.js";
+import QRCode from "qrcode";
 
 export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
   const [scene, setScene] = useState<Scene | null>(null);
@@ -29,8 +30,8 @@ export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange 
           </div>
         </div>
         <div className="row">
-          {scene.golden && <NewPhotoButton sceneId={id} primary onError={setError} />}
-          <button onClick={() => setDialog("integration")}>API & webhook</button>
+          {scene.golden && <NewInspectionButton sceneId={id} primary onError={setError} />}
+          <button onClick={() => setDialog("integration")}>Automation</button>
           <button onClick={() => setDialog("edit")}>Edit</button>
           <Menu label="More actions" items={[{ label: "Delete scene", run: () => setDialog("delete"), danger: true }]} />
         </div>
@@ -48,13 +49,83 @@ export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange 
       {dialog === "delete" && (
         <DeleteSceneDialog scene={scene} onClose={() => setDialog(null)} onDeleted={() => { onScenesChange(); location.hash = "#/"; }} />
       )}
-      {dialog === "integration" && <IntegrationDialog sceneId={id} onClose={() => setDialog(null)} />}
+      {dialog === "integration" && <IntegrationDialog sceneId={id} sceneName={scene.name} onClose={() => setDialog(null)} />}
     </>
   );
 }
 
-// ---------- API & webhook: let another system send photos and receive results ----------
-function IntegrationDialog({ sceneId, onClose }: { sceneId: string; onClose: () => void }) {
+// ---------- auto-upload: let another system send photos and videos, and receive results ----------
+// A sheet to print and put up at the scene: its name, the QR code and the link, in a window of its own.
+function printQr(sceneName: string, link: string, qr: string) {
+  const esc = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch]!);
+  const w = window.open("", "_blank");
+  if (!w) return alert("Allow pop-ups for this site to print the QR code.");
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(sceneName)} · upload QR</title><style>
+    body { font-family: system-ui, sans-serif; text-align: center; margin: 48px 24px; color: #111; }
+    h1 { font-size: 34px; margin: 0 0 8px; } p { font-size: 18px; margin: 0 0 24px; }
+    img { width: 340px; height: 340px; } .url { font-size: 12px; color: #555; word-break: break-all; margin-top: 16px; }
+  </style></head><body><h1>${esc(sceneName)}</h1><p>Scan to send a photo or video of this spot</p>
+  <img src="${qr}" alt="QR code"><div class="url">${esc(link)}</div></body></html>`);
+  w.document.close();
+  w.onload = () => w.print();
+}
+
+// The scene's upload link for people: a page where anyone with the link sends photos and videos from their phone.
+function UploadLinkSection({ sceneId, sceneName, info, onChange, onError }: {
+  sceneId: string; sceneName: string; info: Integration; onChange: (i: Integration) => void; onError: (m: string) => void;
+}) {
+  const link = info.uploadLinkPath ? `${location.origin}${info.uploadLinkPath}` : null;
+  const [qr, setQr] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    setQr("");
+    if (link) void QRCode.toDataURL(link, { width: 680, margin: 2, errorCorrectionLevel: "M" }).then(setQr);
+  }, [link]);
+
+  const change = async (method: "POST" | "DELETE", ask?: string) => {
+    if (ask && !confirm(ask)) return;
+    try {
+      onChange(await api<Integration>(`/api/scenes/${sceneId}/integration/link`, { method }));
+    } catch (e) {
+      onError((e as Error).message);
+    }
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(link!);
+      setCopied(true);
+    } catch {
+      onError("Couldn't copy. Select the link and copy it yourself.");
+    }
+  };
+
+  if (!link) return (
+    <div className="link-off">
+      <p className="muted small">Give your team a link or a printed QR code. They open it on their phone and send photos or videos of this scene, without an account.</p>
+      <button type="button" className="primary" onClick={() => void change("POST")}>Create upload link</button>
+    </div>
+  );
+  return (
+    <div className="upload-link">
+      {qr ? <img className="qr" src={qr} alt={`QR code for the ${sceneName} upload link`} /> : <div className="qr" aria-hidden="true" />}
+      <div className="upload-link-side">
+        <code className="copyable">{link}</code>
+        <div className="row wrap">
+          <button type="button" onClick={() => void copy()}>{copied ? "Copied" : "Copy link"}</button>
+          <button type="button" disabled={!qr} onClick={() => printQr(sceneName, link, qr)}>Print QR</button>
+          <a className="button" href={link} target="_blank" rel="noreferrer">Open</a>
+        </div>
+        <span className="muted small">Anyone with the link can send files here. They see that a file arrived, not the results.</span>
+        <div className="row wrap">
+          <button type="button" className="ghost" onClick={() => void change("POST", "Make a new link? The current link and printed QR codes stop working.")}>New link</button>
+          <button type="button" className="ghost danger" onClick={() => void change("DELETE", "Turn the upload link off? It and printed QR codes stop working.")}>Turn off</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function IntegrationDialog({ sceneId, sceneName, onClose }: { sceneId: string; sceneName: string; onClose: () => void }) {
   const [info, setInfo] = useState<Integration | null>(null);
   const [webhookUrl, setWebhookUrl] = useState("");
   const [error, setError] = useState("");
@@ -83,29 +154,36 @@ function IntegrationDialog({ sceneId, onClose }: { sceneId: string; onClose: () 
 
   const endpoint = info ? `${location.origin}${info.ingestPath}` : "";
   return (
-    <Dialog title="API & webhook" onClose={onClose}>
-      <p className="muted">Another system can send inspection photos for this scene. Each one is checked like an upload, and the result is posted to your webhook as JSON.</p>
+    <Dialog title="Automation" onClose={onClose} wide>
       {!info ? <p className="muted">{error || "Loading…"}</p> : (
         <div className="form">
+          <h3 className="dialog-section">Upload link for your team</h3>
+          <UploadLinkSection sceneId={sceneId} sceneName={sceneName} info={info} onChange={show} onError={setError} />
+          <h3 className="dialog-section">From other systems</h3>
+          <p className="muted small" style={{ margin: 0 }}>Photos and videos sent to this scene's address are checked like uploads. Use it from Zapier, Make, a script or a phone shortcut; results are posted to your webhook as JSON.</p>
           <label>Send a photo
             <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -F image=@photo.jpg ${endpoint}`}</code>
+          </label>
+          <label>Send a video
+            <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -H "Content-Type: video/mp4" --data-binary @video.mp4 "${endpoint}?name=Morning%20round"`}</code>
+            <span className="muted small">Any photo or video can also go as the raw body with its own Content-Type. Up to 15 MB per photo, 200 MB per video.</span>
           </label>
           <form onSubmit={save} className="form" style={{ gap: 4 }}>
             <label htmlFor="webhook-url">Webhook URL</label>
             <div className="row">
-              <input id="webhook-url" type="url" value={webhookUrl} maxLength={500} placeholder="https://example.com/goldenframe"
+              <input id="webhook-url" type="url" value={webhookUrl} maxLength={500} placeholder="https://example.com/truescene"
                 onChange={(e) => { setWebhookUrl(e.target.value); setSaved(false); }} style={{ flex: 1 }} />
               <button className="primary">{saved ? "Saved" : "Save"}</button>
             </div>
           </form>
           <label>Signing secret
             <code className="copyable">{info.webhookSecret}</code>
-            <span className="muted small">Each delivery carries X-GoldenFrame-Signature: sha256=HMAC-SHA256 of the body with this secret.</span>
+            <span className="muted small">Each delivery carries X-TrueScene-Signature: sha256=HMAC-SHA256 of the body with this secret.</span>
           </label>
           {error && <p className="err" role="alert">{error}</p>}
           <div className="row end">
             <button className="ghost" onClick={rotate}>New token and secret</button>
-            <button onClick={onClose} autoFocus>Done</button>
+            <button onClick={onClose}>Done</button>
           </div>
         </div>
       )}
@@ -219,7 +297,7 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
       <section className="panel drop">
         {input}
         <h2>Add the golden photo</h2>
-        <p className="muted">Photograph the scene when it looks exactly right, from the spot every inspection will use. GoldenFrame then finds the objects in it.</p>
+        <p className="muted">Photograph the scene when it looks exactly right, from the spot every inspection will use. TrueScene then finds the objects in it.</p>
         <button className="primary" onClick={() => fileRef.current?.click()} disabled={!!busy}>{label}</button>
         {busy === "upload" && progress !== null && (
           <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Uploading golden photo"
@@ -558,18 +636,18 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
         <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Inspections" />
         <div style={{ flex: 1 }}>
           <h2>Inspections</h2>
-          <p className="muted">Every photo and walkthrough frame checked against the golden photo. A person marks each one reviewed.</p>
+          <p className="muted">Every photo and video frame checked against the golden photo. A person marks each one reviewed.</p>
         </div>
         <div className="row">
           {outdated.length > 0 && <button onClick={recheckOutdated} disabled={rechecking}>{rechecking ? "Starting…" : `Re-check ${outdated.length} outdated`}</button>}
-          <NewPhotoButton sceneId={scene.id} onError={onError} />
         </div>
       </div>
       {!collapsed && (
       <>
+      <VideoNotices sceneId={scene.id} onError={onError} />
       {checks && checks.length === 0 ? (
         <div className="empty small">
-          <p className="muted">No inspections yet. Stand where the golden photo was taken, take a new photo and upload it.</p>
+          <p className="muted">No inspections yet. Stand where the golden photo was taken and take a photo or a short video.</p>
         </div>
       ) : (
         <div className="split">
@@ -583,13 +661,18 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
             </div>
             {shown.length === 0 && <p className="muted small" style={{ padding: 12 }}>Nothing here.</p>}
             <ul className="ilist">
-              {shown.map((c) => (
+              {shown.map((c) => {
+                const isVideo = c.source.type === "video";
+                return (
                 <li key={c.id} className="irow-wrap">
-                  <a href={`#/scenes/${scene.id}/i/${c.id}`} className={`irow${c.id === selected ? " on" : ""}`} aria-current={c.id === selected ? "true" : undefined}>
-                    <img src={c.snapshot.url} alt="" loading="lazy" />
+                  <a href={`#/scenes/${scene.id}/i/${c.id}`} className={`irow${c.id === selected ? " on" : ""}${isVideo ? " is-video" : " is-photo"}`} aria-current={c.id === selected ? "true" : undefined}>
+                    <span className="ithumb">
+                      <img src={c.snapshot.url} alt="" loading="lazy" />
+                      {isVideo && <span className="play-badge" aria-hidden="true">▶</span>}
+                    </span>
                     <span className="irow-main">
-                      <span className="irow-title"><SourceIcon source={c.source} /> {c.source.type === "video" ? c.source.inspectionName : "Photo"}</span>
-                      <span className="muted small">{ago(c.takenAt)}</span>
+                      <span className="irow-title"><SourceIcon source={c.source} /> {c.source.type === "video" ? c.source.inspectionName : "Photo"} <span className={`src-badge${isVideo ? " is-video" : " is-photo"}`}>{isVideo ? "Video" : "Photo"}</span></span>
+                      <span className="muted small">{ago(c.takenAt)}{c.uploadedBy && ` · ${c.uploadedBy}`}</span>
                       <span className="irow-tags">
                         <ReviewPill c={c} />
                         {c.issues > 0 && <span className="tag-issue">{plural(c.issues, "issue")}</span>}
@@ -601,7 +684,8 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
                   <button type="button" className="icon irow-delete" aria-label={`Delete inspection from ${ago(c.takenAt)}`}
                     title="Delete this inspection" onClick={() => remove(c.id, c.status === "running")}>✕</button>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           </div>
           <div className="split-detail">
@@ -618,19 +702,23 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
 
 const MAX_BATCH = 20;
 
-// One or many photos: each becomes its own inspection. They upload one at a time; the server dates each one
-// from the camera (EXIF) and lists them by that, so the order picked doesn't matter.
-export function NewPhotoButton({ sceneId, primary, onError }: { sceneId: string; primary?: boolean; onError: (message: string) => void }) {
-  const ref = useRef<HTMLInputElement>(null);
-  const [upload, setUpload] = useState<{ n: number; of: number; pct: number } | null>(null);
-  const send = async (picked: File[]) => {
+// "+ New inspection" → photos or a video. Each photo becomes its own inspection; they upload one at a time and the
+// server dates each one from the camera (EXIF), so the order picked doesn't matter. A video becomes one inspection
+// per time it shows the scene; until then the scene page shows a notice for it (VideoNotices).
+export function NewInspectionButton({ sceneId, primary, onError }: { sceneId: string; primary?: boolean; onError: (message: string) => void }) {
+  const photoRef = useRef<HTMLInputElement>(null);
+  const videoRef = useRef<HTMLInputElement>(null);
+  const [upload, setUpload] = useState<{ kind: "photo" | "video"; n: number; of: number; pct: number; name?: string; sizeMB?: number } | null>(null);
+  const showInspections = () => document.getElementById("inspections")?.scrollIntoView({ behavior: "smooth" });
+
+  const sendPhotos = async (picked: File[]) => {
     if (!picked.length) return;
     if (picked.length > MAX_BATCH) return onError(`Choose up to ${MAX_BATCH} photos at a time.`);
     onError("");
     const failed: string[] = [];
     const started: { checkId: string; takenAt: string }[] = [];
     for (const [i, file] of picked.entries()) {
-      setUpload({ n: i + 1, of: picked.length, pct: 0 });
+      setUpload({ kind: "photo", n: i + 1, of: picked.length, pct: 0 });
       if (!file.type.startsWith("image/")) {
         failed.push(`${file.name}: not a photo (use JPEG, PNG or WebP)`);
         continue;
@@ -639,13 +727,13 @@ export function NewPhotoButton({ sceneId, primary, onError }: { sceneId: string;
       body.append("image", file);
       try {
         started.push(await uploadForm<{ checkId: string; takenAt: string }>(`/api/scenes/${sceneId}/snapshots`, body,
-          (pct) => setUpload({ n: i + 1, of: picked.length, pct })));
+          (pct) => setUpload({ kind: "photo", n: i + 1, of: picked.length, pct })));
       } catch (err) {
         failed.push(picked.length > 1 ? `${file.name}: ${(err as Error).message}` : (err as Error).message);
       }
     }
     setUpload(null);
-    if (ref.current) ref.current.value = "";
+    if (photoRef.current) photoRef.current.value = "";
     if (failed.length) {
       onError(picked.length > 1 ? `${failed.length} of ${picked.length} photos weren't added. ${failed.join(" · ")}` : failed[0]);
     }
@@ -653,22 +741,112 @@ export function NewPhotoButton({ sceneId, primary, onError }: { sceneId: string;
     const first = started.sort((a, b) => a.takenAt.localeCompare(b.takenAt))[0];
     if (first) {
       location.hash = `#/scenes/${sceneId}/i/${first.checkId}`;
-      document.getElementById("inspections")?.scrollIntoView({ behavior: "smooth" });
+      showInspections();
     }
   };
+
+  const sendVideo = async (file: File | undefined) => {
+    if (!file) return;
+    onError("");
+    setUpload({ kind: "video", n: 1, of: 1, pct: 0, name: file.name, sizeMB: file.size / 1024 / 1024 });
+    try {
+      await uploadVideo(file, [sceneId], (pct) => setUpload((u) => (u?.kind === "video" ? { ...u, pct } : u)));
+      showInspections();
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setUpload(null);
+      if (videoRef.current) videoRef.current.value = "";
+    }
+  };
+
   const total = upload ? Math.round(((upload.n - 1) * 100 + upload.pct) / upload.of) : 0;
+  if (upload?.kind === "video") {
+    return (
+      <span className="upload-wrap">
+        <input ref={photoRef} type="file" accept="image/*" multiple hidden onChange={(e) => sendPhotos([...(e.target.files ?? [])])} />
+        <input ref={videoRef} type="file" accept="video/*" hidden onChange={(e) => sendVideo(e.target.files?.[0])} />
+        <div className="upload-card upload-video" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={upload.pct}
+          aria-label={`Uploading video${upload.name ? ` ${upload.name}` : ""}`}>
+          <span className="upload-icon" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="14" height="12" rx="2" /><path d="m16 10 6-3v10l-6-3z" /></svg>
+          </span>
+          <span className="upload-body">
+            <span className="upload-top"><b>Uploading video…</b><span className="upload-pct">{upload.pct}%</span></span>
+            {(upload.name || upload.sizeMB !== undefined) && (
+              <span className="muted small upload-name">
+                {[upload.name, upload.sizeMB !== undefined ? `${upload.sizeMB.toFixed(1)} MB` : ""].filter(Boolean).join(" · ")}
+              </span>
+            )}
+            <span className="upload-bar"><div style={{ width: `${upload.pct}%` }} /></span>
+            <span className="muted small">Keep this page open — finding the scene starts automatically.</span>
+          </span>
+        </div>
+      </span>
+    );
+  }
   return (
     <span className="upload-wrap">
-      <input ref={ref} type="file" accept="image/*" multiple hidden onChange={(e) => send([...(e.target.files ?? [])])} />
-      <button className={primary ? "primary" : undefined} onClick={() => ref.current?.click()} disabled={!!upload}
-        title={upload ? undefined : `Pick one photo, or up to ${MAX_BATCH} at once`}>
-        {upload ? (upload.of > 1 ? `Uploading ${upload.n} of ${upload.of}…` : `Uploading… ${upload.pct}%`) : "+ New inspection"}
-      </button>
+      <input ref={photoRef} type="file" accept="image/*" multiple hidden onChange={(e) => sendPhotos([...(e.target.files ?? [])])} />
+      <input ref={videoRef} type="file" accept="video/*" hidden onChange={(e) => sendVideo(e.target.files?.[0])} />
+      {upload ? (
+        <button className={primary ? "primary" : undefined} disabled>
+          {upload.of > 1 ? `Uploading ${upload.n} of ${upload.of}…` : `Uploading… ${upload.pct}%`}
+        </button>
+      ) : (
+        <>
+          <button className="btn-photo" onClick={() => photoRef.current?.click()}
+            title={`Up to ${MAX_BATCH} photos at a time`}>+ Add photos <span className="btn-sub">up to {MAX_BATCH}</span></button>
+          <button className="btn-video" onClick={() => videoRef.current?.click()} title="One video, up to 3 min">+ Add video <span className="btn-sub">up to 3 min</span></button>
+        </>
+      )}
       {upload && (
-        <span className="upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={total} aria-label="Uploading photos">
+        <span className="upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={total}
+          aria-label="Uploading photos">
           <span className="bar"><div style={{ width: `${total}%` }} /></span>
         </span>
       )}
     </span>
+  );
+}
+
+// Videos uploaded for this scene that haven't become inspections: still being processed, or the scene wasn't seen
+// in them / processing failed (dismissable). Found frames show up as ordinary inspections instead.
+function VideoNotices({ sceneId, onError }: { sceneId: string; onError: (m: string) => void }) {
+  const [notices, setNotices] = useState<VideoNotice[]>([]);
+  const load = useCallback(() => api<VideoNotice[]>(`/api/video/scenes/${sceneId}`).then(setNotices).catch(() => {}), [sceneId]);
+  useEffect(() => void load(), [load]);
+  useStream<{ id: string; sceneId?: string }>("inspection", (e) => (!e.sceneId || e.sceneId === sceneId) && void load());
+
+  const dismiss = async (n: VideoNotice) => {
+    setNotices((prev) => prev.filter((x) => x.inspectionId !== n.inspectionId));
+    try {
+      await api(`/api/video/inspections/${n.inspectionId}/scenes/${sceneId}`, { method: "DELETE" });
+    } catch (err) {
+      onError((err as Error).message);
+      void load();
+    }
+  };
+
+  if (!notices.length) return null;
+  return (
+    <ul className="video-notices">
+      {notices.map((n) => {
+        const busy = n.status === "pending" || n.status === "checking";
+        return (
+          <li key={n.inspectionId} className={`video-notice${busy ? "" : n.status === "failed" ? " failed" : " not-seen"}`} role={busy ? "status" : undefined}>
+            {busy ? <span className="spinner" /> : <SourceIcon source={{ type: "video", inspectionId: n.inspectionId, inspectionName: n.name, frameMs: null }} />}
+            <span className="irow-main">
+              <strong>{n.name}</strong>
+              <span className="muted small">
+                {busy ? `${n.stage ?? "Finding the scene"}…` : n.status === "failed" ? "The video couldn't be checked." : "This scene wasn't seen in the video."}
+                {!busy && n.note && ` ${n.note}`} · {ago(n.createdAt)}
+              </span>
+            </span>
+            {!busy && <button type="button" className="sm ghost" onClick={() => dismiss(n)}>Dismiss</button>}
+          </li>
+        );
+      })}
+    </ul>
   );
 }

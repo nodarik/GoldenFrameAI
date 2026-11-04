@@ -4,78 +4,73 @@ import { join } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { z } from "zod";
-import { type RuleResult, getChecklist } from "../checklist.js";
-import { type CheckRow, type SceneRow, db, getScene } from "../db.js";
+import { type SceneRow, db, getScene } from "../db.js";
 import { nowIso } from "../ids.js";
-import { type InspectionRow, getInspection, listAreas, newVideoId } from "./db.js";
-import { inspectionDir, runInspection } from "./pipeline.js";
+import { bus } from "../runlog.js";
+import { type AreaRow, type InspectionRow, getInspection, inspectionDir, listAreas, newVideoId, pruneInspection } from "./db.js";
+import { runInspection } from "./pipeline.js";
+import { type AppEnv, access, sceneIn } from "../workspaces.js";
 
-export const videoApp = new Hono();
+export const videoApp = new Hono<AppEnv>();
 const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 const MAX_AREAS = 20;
 class TooLarge extends Error {}
 
 // ---------- serialisation ----------
-const goldenUrl = (s: SceneRow) => `/media/scenes/${s.id}/golden.jpg?v=${encodeURIComponent(s.golden_path ?? "")}`;
-
-type CheckJoined = CheckRow & { snapshot_w: number; snapshot_h: number };
-const getCheck = (id: string) =>
-  db.prepare("SELECT c.*, s.w AS snapshot_w, s.h AS snapshot_h FROM checks c JOIN snapshots s ON s.id = c.snapshot_id WHERE c.id = ?").get(id) as
-    CheckJoined | undefined;
-
-// The media URLs are the photo feature's routes (server/index.ts).
-const checkJson = (c: CheckJoined) => ({
-  id: c.id, status: c.status, reviewStatus: c.review_status, costUsd: c.cost_usd,
-  score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
-  snapshot: { url: `/media/snapshots/${c.snapshot_id}.jpg`, w: c.snapshot_w, h: c.snapshot_h },
-  golden: { url: `/media/checks/${c.id}/golden.jpg`, w: c.golden_w, h: c.golden_h },
-  result: JSON.parse(c.result_json),
-});
-
-function inspectionJson(ins: InspectionRow, withAreas: boolean) {
-  let ok = 0, total = 0, review = 0;
-  const areas = listAreas(ins.id).map((a) => {
-    const check = a.check_id ? getCheck(a.check_id) : undefined;
-    const result = check ? JSON.parse(check.result_json) : {};
-    const checklist = (result.checklist ?? []) as RuleResult[];
-    const findings = (result.findings ?? []) as { status: string }[];
-    // score_total already counts checklist rules.
-    if (check?.score_total) { ok += check.score_ok ?? 0; total += check.score_total; }
-    review += checklist.filter((r) => r.status === "needs_review").length + findings.filter((f) => f.status === "needs_review").length;
-    return {
-      sceneId: a.scene_id, name: getScene(a.scene_id)?.name ?? "Deleted scene", status: a.status, frameMs: a.frame_ms, note: a.note,
-      checklist, check: check ? checkJson(check) : null,
-    };
-  });
+// A scene in a video: still being looked for, not seen / failed (its notice), or found (its inspections).
+export function inspectionJson(ins: InspectionRow) {
+  const areas = new Map(listAreas(ins.id).map((a) => [a.scene_id, a]));
+  const frames = db.prepare("SELECT scene_id, check_id FROM video_frames WHERE inspection_id = ? ORDER BY frame_ms").all(ins.id) as
+    { scene_id: string; check_id: string }[];
+  const sceneIds = [...new Set([...areas.keys(), ...frames.map((f) => f.scene_id)])];
   return {
     id: ins.id, name: ins.name, status: ins.status, stage: ins.stage, error: ins.error, createdAt: ins.created_at, durationMs: ins.duration_ms,
-    areaCount: areas.length, notSeen: areas.filter((a) => a.status === "not_seen").length,
-    score: total ? { ok, total } : null, needsReview: review,
-    ...(withAreas ? { video: { url: `/media/video/${ins.id}`, type: ins.video_type }, areas } : {}),
+    scenes: sceneIds.map((sceneId) => {
+      const area = areas.get(sceneId), checkIds = frames.filter((f) => f.scene_id === sceneId).map((f) => f.check_id);
+      return {
+        sceneId, name: getScene(sceneId)?.name ?? "Deleted scene", status: area?.status ?? "found", note: area?.note ?? null, checkIds,
+      };
+    }),
   };
 }
 
-// ---------- areas and their checklists ----------
-videoApp.get("/api/video/areas", (c) => {
-  const scenes = db.prepare("SELECT * FROM scenes WHERE golden_path IS NOT NULL ORDER BY created_at DESC").all() as SceneRow[];
-  return c.json(scenes.map((s) => ({ id: s.id, name: s.name, golden: { url: goldenUrl(s), w: s.golden_w, h: s.golden_h }, checklist: getChecklist(s.id) })));
-});
-
 // ---------- inspections ----------
-videoApp.get("/api/video/inspections", (c) => {
-  const rows = db.prepare("SELECT * FROM inspections ORDER BY created_at DESC LIMIT 100").all() as InspectionRow[];
-  return c.json(rows.map((r) => inspectionJson(r, false)));
-});
+// The scenes a video should inspect: all in the asker's workspace, each with a golden photo.
+function scenesFor(ws: string, ids: string[]): SceneRow[] | { error: string; status: 400 } {
+  const scenes = [...new Set(ids)].slice(0, MAX_AREAS).map((id) => sceneIn(ws, id));
+  if (!scenes.length || scenes.some((s) => !s?.golden_path)) return { error: "Every chosen scene needs a golden photo.", status: 400 };
+  return scenes as SceneRow[];
+}
+
+function record(id: string, ws: string, name: string, path: string, type: string, scenes: SceneRow[], by: string | null = null) {
+  db.prepare(`INSERT INTO inspections (id, workspace_id, name, video_path, video_type, status, stage, created_at, uploaded_by)
+    VALUES (?, ?, ?, ?, ?, 'processing', 'Queued', ?, ?)`).run(id, ws, name, path, type, nowIso(), by);
+  scenes.forEach((s, i) =>
+    db.prepare("INSERT INTO inspection_areas (inspection_id, scene_id, position, status) VALUES (?, ?, ?, 'pending')").run(id, s.id, i));
+  bus.emit("inspection", { id });
+  void runInspection(id); // runs in the background; the UI follows it over /api/stream
+}
+
+const ownInspection = (c: Context<AppEnv>, id: string) => {
+  const ins = getInspection(id);
+  return ins && ins.workspace_id === access(c).ws ? ins : undefined;
+};
 
 // The raw video is the request body (no multipart), streamed to disk with a size cap.
 videoApp.post("/api/video/inspections", async (c) => {
   const q = z.object({ name: z.string().trim().min(1).max(80), sceneIds: z.string().min(1).max(2000) })
     .safeParse({ name: c.req.query("name"), sceneIds: c.req.query("sceneIds") });
-  if (!q.success) return c.json({ error: "Give the walkthrough a name and choose at least one scene." }, 400);
-  const scenes = [...new Set(q.data.sceneIds.split(","))].slice(0, MAX_AREAS).map(getScene);
-  if (scenes.some((s) => !s?.golden_path)) return c.json({ error: "Every chosen scene needs a golden photo." }, 400);
+  if (!q.success) return c.json({ error: "Name the video and choose at least one scene." }, 400);
+  return receiveVideo(c, access(c).ws, q.data.name, q.data.sceneIds.split(","));
+});
+
+// Stores the request body as a video and starts inspecting it for the given scenes. Also used by a scene's
+// ingest endpoint (server/index.ts), where a scene token stands in for the signed-in workspace.
+export async function receiveVideo(c: Context, ws: string, name: string, sceneIds: string[], by: string | null = null) {
+  const scenes = scenesFor(ws, sceneIds);
+  if ("error" in scenes) return c.json({ error: scenes.error }, scenes.status);
   const type = (c.req.header("content-type") ?? "").split(";")[0].trim();
   if (!type.startsWith("video/")) return c.json({ error: "Choose a video file (MP4, MOV or WebM)." }, 400);
   if (Number(c.req.header("content-length") ?? 0) > MAX_VIDEO_BYTES) return c.json({ error: "Videos must be 200 MB or smaller." }, 413);
@@ -100,33 +95,46 @@ videoApp.post("/api/video/inspections", async (c) => {
     return c.json({ error: "The video is empty." }, 400);
   }
 
-  db.prepare("INSERT INTO inspections (id, name, video_path, video_type, status, stage, created_at) VALUES (?, ?, ?, ?, 'processing', 'Queued', ?)")
-    .run(id, q.data.name, path, type, nowIso());
-  scenes.forEach((s, i) =>
-    db.prepare("INSERT INTO inspection_areas (inspection_id, scene_id, position, status) VALUES (?, ?, ?, 'pending')").run(id, s!.id, i));
-  void runInspection(id); // runs in the background; the UI follows it over /api/video/stream
+  record(id, ws, name, path, type, scenes, by);
   return c.json({ id }, 202);
-});
+}
 
 videoApp.get("/api/video/inspections/:id", (c) => {
-  const ins = getInspection(c.req.param("id"));
-  if (!ins) return c.json({ error: "Inspection not found." }, 404);
-  return c.json(inspectionJson(ins, true));
+  const ins = ownInspection(c, c.req.param("id"));
+  if (!ins) return c.json({ error: "Video not found." }, 404);
+  return c.json(inspectionJson(ins));
 });
 
-videoApp.delete("/api/video/inspections/:id", (c) => {
-  const ins = getInspection(c.req.param("id"));
-  if (!ins) return c.json({ error: "Inspection not found." }, 404);
-  if (ins.status === "processing") return c.json({ error: "Wait until the inspection finishes." }, 409);
-  db.prepare("DELETE FROM inspections WHERE id = ?").run(ins.id);
-  rmSync(inspectionDir(ins.id), { recursive: true, force: true });
+// A scene page's video notices: videos still looking for this scene, and ones that didn't find it or failed.
+videoApp.get("/api/video/scenes/:sceneId", (c) => {
+  if (!sceneIn(access(c).ws, c.req.param("sceneId"))) return c.json({ error: "Scene not found." }, 404);
+  const rows = db.prepare(`SELECT a.inspection_id, a.status, a.note, i.name, i.stage, i.error, i.created_at
+    FROM inspection_areas a JOIN inspections i ON i.id = a.inspection_id WHERE a.scene_id = ? ORDER BY i.created_at DESC`)
+    .all(c.req.param("sceneId")) as { inspection_id: string; status: AreaRow["status"]; note: string | null; name: string; stage: string | null; error: string | null; created_at: string }[];
+  return c.json(rows.map((r) => ({
+    inspectionId: r.inspection_id, name: r.name, createdAt: r.created_at, status: r.status,
+    stage: r.status === "pending" ? r.stage : null, note: r.note ?? r.error,
+  })));
+});
+
+// Dismiss a "not seen" / "failed" notice; the video goes once nothing refers to it.
+videoApp.delete("/api/video/inspections/:id/scenes/:sceneId", (c) => {
+  const { id, sceneId } = c.req.param();
+  if (!ownInspection(c, id)) return c.body(null, 204);
+  const area = db.prepare("SELECT status FROM inspection_areas WHERE inspection_id = ? AND scene_id = ?").get(id, sceneId) as
+    { status: AreaRow["status"] } | undefined;
+  if (!area) return c.body(null, 204);
+  if (area.status === "pending" || area.status === "checking") return c.json({ error: "Wait until the video is processed." }, 409);
+  db.prepare("DELETE FROM inspection_areas WHERE inspection_id = ? AND scene_id = ?").run(id, sceneId);
+  pruneInspection(id);
+  bus.emit("inspection", { id, sceneId });
   return c.body(null, 204);
 });
 
 // ---------- live updates and media ----------
 // Supports Range requests so the player can seek.
 videoApp.get("/media/video/:id", (c) => {
-  const ins = getInspection(c.req.param("id"));
+  const ins = ownInspection(c, c.req.param("id"));
   if (!ins || !existsSync(ins.video_path)) return c.text("Not found", 404);
   const size = statSync(ins.video_path).size;
   const headers = { "Content-Type": ins.video_type, "Accept-Ranges": "bytes", "Cache-Control": "private, max-age=86400" };

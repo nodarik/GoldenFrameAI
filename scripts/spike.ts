@@ -1,4 +1,4 @@
-// Day-1 spike: proves the Meta models can do what GoldenFrame needs, on real photos.
+// Day-1 spike: proves the Meta models can do what TrueScene needs, on real photos.
 // Usage: npm run spike -- [--tap 0.35,0.45] [--items pillow,towel,lamp] [--yard-items person,car,truck]
 // Photos (not committed): spike/room-golden.jpg, spike/room-new.jpg, spike/yard.jpg
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";

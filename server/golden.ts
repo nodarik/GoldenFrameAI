@@ -188,7 +188,7 @@ function finish(checkId: string, sceneId: string, result: CheckResult, forced?: 
   db.prepare("UPDATE checks SET status = ?, score_ok = ?, score_total = ?, result_json = ?, cost_usd = ?, review_status = ?, reviewed_at = ? WHERE id = ?")
     .run(status, ok, result.items.length + rules.length, JSON.stringify(result), cost, reviewed ? "reviewed" : "needs_review", reviewed ? nowIso() : null, checkId);
   db.prepare("UPDATE snapshots SET status = 'done' WHERE id = (SELECT snapshot_id FROM checks WHERE id = ?)").run(checkId);
-  if (reviewed) addHistory(checkId, "auto_reviewed", "Everything matched the golden photo and checklist.", "GoldenFrame");
+  if (reviewed) addHistory(checkId, "auto_reviewed", "Everything matched the golden photo and checklist.", "TrueScene");
 
   if (status === "retake") emitEvent(sceneId, checkId, "retake_needed", { viewNote: result.viewNote, alignment: result.alignment ?? null });
   for (const f of result.findings) if (f.status === "confirmed") emitFinding(sceneId, checkId, f);
