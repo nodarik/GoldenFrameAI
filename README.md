@@ -180,7 +180,7 @@ server/  index.ts (routes)  meta.ts (model calls)  golden.ts (initial photo setu
          verify.ts  align.ts  checklist.ts (model output → decisions)
          video/ (frames, frame picking, video inspections)  webhook.ts  workspaces.ts  runlog.ts
 web/     board.tsx  scene.tsx  inspection.tsx  photo.tsx  upload.tsx  api.ts  styles.css
-scripts/ seed-demo.ts  spike.ts
+scripts/ seed-demo.ts
 ```
 
 </details>
