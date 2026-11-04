@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { type Run, type SceneSummary, type Video, api, columnOf, useStream } from "./api.js";
 import { Board } from "./board.js";
 import { RunTable } from "./inspection.js";
-import { ScenePage } from "./scene.js";
+import { ScenePage, type SceneTab } from "./scene.js";
 import { UploadPage } from "./upload.js";
 
 // ---------- routing ----------
@@ -19,14 +19,14 @@ function useHashRoute() {
 
 type Page =
   | { name: "board"; group: string | null }
-  | { name: "scene"; id: string; checkId: string | null; tab: "inspections" | "report" }
+  | { name: "scene"; id: string; checkId: string | null; tab: SceneTab }
   | { name: "legacy-video"; id: string | null }
   | { name: "activity" }
   | { name: "legacy-check"; id: string };
 
 function pageOf(route: string): Page {
   let m: RegExpMatchArray | null;
-  if ((m = route.match(/^\/scenes\/([\w-]+)(?:\/i\/([\w-]+)|\/(report))?$/))) return { name: "scene", id: m[1], checkId: m[2] ?? null, tab: m[3] ? "report" : "inspections" };
+  if ((m = route.match(/^\/scenes\/([\w-]+)(?:\/i\/([\w-]+)|\/(setup|report))?$/))) return { name: "scene", id: m[1], checkId: m[2] ?? null, tab: (m[3] as SceneTab | undefined) ?? "inspections" };
   if ((m = route.match(/^\/group\/(.+)$/))) return { name: "board", group: decodeURIComponent(m[1]) };
   if ((m = route.match(/^\/(?:walkthroughs|videos)(?:\/([\w-]+))?$/))) return { name: "legacy-video", id: m[1] && m[1] !== "checklists" ? m[1] : null };
   if ((m = route.match(/^\/checks\/([\w-]+)$/))) return { name: "legacy-check", id: m[1] };

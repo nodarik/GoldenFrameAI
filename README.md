@@ -4,10 +4,10 @@
 
 **Photograph a place once when it's right. Know when it isn't.**
 
-TrueScene compares every new photo or video of a hotel room, restaurant table or bar shelf against one *initial photo*,
+TrueScene compares every new photo or video of a place (a building site, a road, a hotel room, a shop shelf) against one *initial photo*,
 turns the differences into findings, and asks a person to review them.
 
-[**▶ Try the live demo**](https://truescene.fly.dev) · [How it works](#how-it-works) · [Run it yourself](#run-it-yourself) · [API & webhooks](#automation-upload-links-api-webhooks)
+[**▶ Watch the 3-minute demo**](https://www.loom.com/share/d85811f72f4e4b759bdddfd5053f432f) · [**Try the live demo**](https://truescene.fly.dev) · [How it works](#how-it-works) · [Run it yourself](#run-it-yourself) · [API & webhooks](#automation-upload-links-api-webhooks)
 
 ![Meta SAM 3.1](https://img.shields.io/badge/Meta-SAM%203.1-0866FF) ![Muse Spark](https://img.shields.io/badge/Meta-Muse%20Spark-0866FF) ![Muse Wonder](https://img.shields.io/badge/Meta-Muse%20Wonder-0866FF) ![License: MIT](https://img.shields.io/badge/license-MIT-yellow) ![Node 22.5+](https://img.shields.io/badge/node-22.5+-green)
 
@@ -28,10 +28,10 @@ If the first page load is slow, the server is waking up. Give it a few seconds.
 
 ## The problem
 
-Hotels, restaurants and shops check the same places every day. Is the bed made? Are all 18 bottles on the shelf? Is the entrance clean?
-Someone has to walk there and look, and "looks fine" means something different to every person.
+Building sites, roads, hotels, restaurants and shops are checked over and over. Was the site left safe tonight? Was the road repair really finished? Is the room ready for the next guest?
+The manager or the owner can't be everywhere, so they ask someone, wait for an answer, and hope it's true. And "looks fine" means something different to every person.
 
-TrueScene makes the standard a photo. Take it once when the place is perfect. After that, a housekeeper's phone photo, a walk-through video or a fixed camera is checked against it.
+TrueScene makes the standard a photo. Take it once when the place is right. After that, a worker's phone photo, a walk-through video or a fixed camera is checked against it.
 Models do the looking, and **a person makes every final call**.
 
 ## Screenshots
@@ -92,7 +92,7 @@ All runtime models are Meta models. Making outlines follow objects on a playing 
 **Video inspections**
 - A video is sampled at 1 frame per second. Each time it shows a scene, the best frame becomes an inspection for that scene (up to 5 per scene)
 - Start one from a scene, or from a group to cover every scene in it. Scenes the video never showed get a *Not seen* notice
-- **▶ Watch video** plays the recording with the inspection drawn on it: outlines and labels for watched objects, findings and failed checklist points **follow their objects as the camera moves**, for up to 10 seconds around each checked moment. Dots under the player jump to each checked moment
+- A video inspection plays the recording right in the page with the inspection drawn on it: outlines and labels for watched objects, findings and failed checklist points **follow their objects as the camera moves**, for up to 10 seconds around each checked moment. Dots under the player jump to each checked moment
 - The models look only at the picked frames. The motion between them is measured once per video with classic optical flow (pyramidal Lucas–Kanade on small grayscale frames): no model call and no extra cost
 
 **Operations**
@@ -190,6 +190,13 @@ scripts/ seed-demo.ts
 ## Privacy
 
 All data stays in `DATA_DIR` on your own server. Uploads are re-encoded, which removes GPS and other EXIF data. Demo workspaces are deleted after a week without use.
+
+## How this was built
+
+- Built during the hackathon window (Oct 27 – Nov 4, 2026). Every commit in this repository falls inside it.
+- Every model the app calls at runtime is a Meta model: SAM 3.1, Muse Spark and Muse Wonder.
+- The code was written with help from an AI coding assistant (Claude Code). All product decisions, testing and review were done by the author.
+- The opening images in the demo video are AI-generated illustrations (Google Gemini). They are not part of the app, and the app does not call Gemini.
 
 ## License
 

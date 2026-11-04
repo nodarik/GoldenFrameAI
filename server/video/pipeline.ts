@@ -9,8 +9,9 @@ import { newId, nowIso } from "../ids.js";
 import { type Img, load, normalise } from "../images.js";
 import { errorText, imagePart, json, mapLimit } from "../meta.js";
 import { bus } from "../runlog.js";
-import { type AreaRow, getInspection, inspectionDir, listAreas, pruneInspection } from "./db.js";
+import { type AreaRow, frameAspect, getInspection, inspectionDir, listAreas, pruneInspection } from "./db.js";
 import { contactSheet, extractFrames } from "./frames.js";
+import { motionOf } from "./motion.js";
 import { MAX_VISITS, PICK_FRAME } from "./prompts.js";
 
 const AREAS_PARALLEL = 2;
@@ -53,6 +54,9 @@ export async function runInspection(id: string) {
   bus.emit("inspection", { id });
   bus.emit("videoFinished", { id }); // the scenes' webhooks; listeners read the inspection before it may be pruned
   pruneInspection(id); // nothing came of it (and nothing left to show): drop the video
+  // A kept video gets its motion measured now, so outlines follow their objects from the first time it's watched.
+  const aspect = getInspection(id) && frameAspect(id);
+  if (aspect) await motionOf(ins.video_path, aspect).catch((e) => console.error(`Motion for video ${id}:`, e));
 }
 
 // Every time the video shows the scene becomes its own inspection. Once they exist, the scene page shows them

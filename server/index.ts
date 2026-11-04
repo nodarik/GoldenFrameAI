@@ -11,9 +11,9 @@ import { DEFAULT_SECTION, MAX_RULES, type Rule, getChecklist, setChecklist } fro
 import { type CheckRow, DIGEST_EVERY, type DigestEvery, type ItemRow, type ReviewRow, type SceneRow, type SnapshotRow, db, getScene, listItems, saveMedia } from "./db.js";
 import { env } from "./env.js";
 import { newId, newSecret, nowIso } from "./ids.js";
-import { type CheckResult, ReviewError, decide, failInterrupted, openFlags, runCheck, setReview } from "./golden.js";
+import { type CheckResult, ReviewError, decide, failInterrupted, issueCount, openFlags, runCheck, setFixed, setReview } from "./golden.js";
 import { type Box, type Img, load, normalise, takenAt } from "./images.js";
-import { DRAFT_CHECKLIST, SCENE_REPORT, errorText, imagePart, json } from "./meta.js";
+import { DRAFT_CHECKLIST, DRAFT_SIZES, type DraftSize, SCENE_REPORT, errorText, imagePart, json } from "./meta.js";
 import { SpendLimitError, bus, spentTodayUsd, workspaceSpentUsd } from "./runlog.js";
 import { TapError, detectItems, recount, tapToItem } from "./setup.js";
 import { frameOf, getInspection, newVideoId, pruneInspection } from "./video/db.js";
@@ -136,6 +136,13 @@ app.get("/api/scenes", (c) => {
     (db.prepare(`SELECT s.scene_id, COUNT(*) AS n FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
       GROUP BY s.scene_id`).all() as { scene_id: string; n: number }[]).map((r) => [r.scene_id, r.n]),
   );
+  // Issues a person confirmed on a reviewed inspection and nobody has marked fixed yet, per scene.
+  const openIssues = new Map<string, number>();
+  for (const r of db.prepare(`SELECT s.scene_id, c.result_json FROM checks c JOIN snapshots s ON s.id = c.snapshot_id
+      WHERE c.review_status = 'reviewed' AND c.fixed_at IS NULL AND c.status != 'running'`).all() as { scene_id: string; result_json: string }[]) {
+    const n = issueCount(JSON.parse(r.result_json));
+    if (n) openIssues.set(r.scene_id, (openIssues.get(r.scene_id) ?? 0) + n);
+  }
   // Photo vs video split: a check made from a video frame has a video_frames row, otherwise it's a photo upload.
   const byType = new Map(
     (db.prepare(`SELECT s.scene_id,
@@ -149,7 +156,7 @@ app.get("/api/scenes", (c) => {
   );
   return c.json(scenes.map((s) => ({
     ...sceneJson(s), itemCount: counts.get(s.id) ?? 0, ruleCount: getChecklist(s.id).length,
-    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0, checkCount: totals.get(s.id) ?? 0,
+    lastCheck: last.get(s.id) ?? null, toReview: pending.get(s.id) ?? 0, checkCount: totals.get(s.id) ?? 0, openIssues: openIssues.get(s.id) ?? 0,
     photoCount: byType.get(s.id)?.photos ?? 0, videoCount: byType.get(s.id)?.videos ?? 0,
     photoToReview: byType.get(s.id)?.photo_review ?? 0, videoToReview: byType.get(s.id)?.video_review ?? 0,
   })));
@@ -157,8 +164,7 @@ app.get("/api/scenes", (c) => {
 
 // Issues = confirmed findings + failed rules; flags = points a person still has to decide.
 function tallyOf(r: Partial<CheckResult>) {
-  const issues = (r.findings ?? []).filter((f) => f.status === "confirmed").length + (r.checklist ?? []).filter((x) => x.status === "fail").length;
-  return { issues, flags: r.findings ? openFlags(r as CheckResult) : 0 };
+  return { issues: issueCount(r), flags: r.findings ? openFlags(r as CheckResult) : 0 };
 }
 
 const SceneFields = z.object({
@@ -382,35 +388,37 @@ app.put("/api/scenes/:id/checklist", async (c) => {
 
 const Draft = z.object({ sections: z.array(z.object({ name: z.string().max(60), rules: z.array(z.string().max(200)).max(10) })).max(8) });
 
-// Muse Wonder drafts sections of rules from the initial photo; they're added after the existing rules.
+// Muse Wonder drafts a checklist from the initial photo, short, standard or thorough, about the whole scene or only the
+// watched objects, and it replaces the scene's checklist. The old rules stay until a draft has arrived, so a failed
+// draft leaves them as they were.
 app.post("/api/scenes/:id/checklist/draft", async (c) => {
   const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const body = z.object({
+    size: z.enum(Object.keys(DRAFT_SIZES) as [DraftSize, ...DraftSize[]]).default("standard"),
+    watchedOnly: z.boolean().default(false),
+  }).safeParse((await c.req.json().catch(() => null)) ?? {});
+  if (!body.success) return c.json({ error: "Choose a checklist size: short, standard or thorough." }, 400);
+  const size = DRAFT_SIZES[body.data.size];
   const golden = await goldenOf(scene);
   if (!golden) return c.json({ error: "Upload the initial photo first." }, 400);
   const items = listItems(scene.id);
-  const existing = getChecklist(scene.id);
-  // Drafting again adds to the checklist: Wonder sees what's there so it neither repeats it nor renames its sections.
-  const context = [
-    items.length ? `Watched items: ${items.map((i) => i.name).join(", ")}` : "No watched items.",
-    existing.length
-      ? `Already in the checklist (do not repeat or reword these; reuse a section name when a new rule fits it):\n${existing.map((r) => `${r.section}: ${r.text}`).join("\n")}`
-      : "The checklist is empty.",
-  ].join("\n\n");
+  if (body.data.watchedOnly && !items.length) return c.json({ error: "Watch some objects on the initial photo first." }, 400);
+  const context = items.length ? `Watched items: ${items.map((i) => i.name).join(", ")}` : "No watched items.";
+  const focus = body.data.watchedOnly ? ` ${DRAFT_CHECKLIST.watchedOnly}` : "";
   try {
     const ask = (hint: string) => json({ sceneId: scene.id }, {
       step: "checklist.draft", model: env.WONDER_MODEL, name: DRAFT_CHECKLIST.name, jsonSchema: DRAFT_CHECKLIST.jsonSchema, schema: Draft,
-      system: DRAFT_CHECKLIST.system + hint, content: [{ type: "text", text: context }, imagePart(golden)],
+      system: `${DRAFT_CHECKLIST.system} ${size.prompt}${focus}${hint}`, content: [{ type: "text", text: context }, imagePart(golden)],
     });
     // An empty draft happens now and then; one retry with a firmer instruction fixes it.
     let draft = await ask("");
-    if (!draft.sections.some((s) => s.rules.length)) draft = await ask(" Your last answer had no rules. Write at least 2 sections with 3 rules each.");
+    if (!draft.sections.some((s) => s.rules.length)) draft = await ask(" Your last answer had no rules. Return at least one section with rules.");
     if (!draft.sections.some((s) => s.rules.length)) return c.json({ error: "Muse Wonder didn't suggest any rules. Try again, or write them yourself." }, 502);
-    const current = getChecklist(scene.id);
-    const seen = new Set(current.map((r) => r.text.toLowerCase()));
-    const added = draft.sections.flatMap((s) => s.rules.map((text) => ({ text: text.trim(), section: s.name.trim() })))
-      .filter((r) => r.text && !seen.has(r.text.toLowerCase()));
-    return c.json({ checklist: saveRules(scene.id, [...current, ...added].slice(0, MAX_RULES)) });
+    const seen = new Set<string>();
+    const rules = draft.sections.flatMap((s) => s.rules.map((text) => ({ text: text.trim(), section: s.name.trim() })))
+      .filter((r) => r.text && !seen.has(r.text.toLowerCase()) && seen.add(r.text.toLowerCase())).slice(0, size.rules);
+    return c.json({ checklist: saveRules(scene.id, rules) });
   } catch (e) {
     const f = failure(e);
     return c.json({ error: f.error }, f.status);
@@ -442,7 +450,7 @@ const checkJson = (c: CheckJoined, full: boolean) => {
   const result = JSON.parse(c.result_json);
   return {
     id: c.id, sceneId: c.scene_id, status: c.status, createdAt: c.created_at, takenAt: c.captured_at, costUsd: c.cost_usd,
-    reviewStatus: c.review_status, reviewedAt: c.reviewed_at, ...tallyOf(result), source: sourceOf(c.id), uploadedBy: c.uploaded_by,
+    reviewStatus: c.review_status, reviewedAt: c.reviewed_at, fixedAt: c.fixed_at, ...tallyOf(result), source: sourceOf(c.id), uploadedBy: c.uploaded_by,
     // The initial photo, watched items or checklist changed after this check ran.
     outdated: c.status !== "running" && c.setup_version < c.scene_setup_version,
     score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
@@ -491,7 +499,7 @@ async function recheck(check: CheckJoined, by: string | null) {
   }
   // Claimed in one statement, so two clicks can't start it twice.
   const claimed = db.prepare(`UPDATE checks SET status = 'running', result_json = '{}', score_ok = NULL, score_total = NULL,
-    review_status = 'needs_review', reviewed_at = NULL, golden_path = ?, golden_w = ?, golden_h = ?, setup_version = ?
+    review_status = 'needs_review', reviewed_at = NULL, fixed_at = NULL, golden_path = ?, golden_w = ?, golden_h = ?, setup_version = ?
     WHERE id = ? AND status != 'running'`).run(scene.golden_path, golden.w, golden.h, scene.setup_version, check.id);
   if (!claimed.changes) return { error: "It's already being checked.", status: 409 as const };
   db.prepare("INSERT INTO check_reviews (check_id, action, note, by, at, result_json) VALUES (?, 'rechecked', ?, ?, ?, ?)")
@@ -598,6 +606,22 @@ app.post("/api/checks/:id/review", async (c) => {
   return c.json(checkJson(getCheck(check.id)!, true));
 });
 
+// A reviewed inspection's issues fixed, or not fixed after all, with an optional note.
+app.post("/api/checks/:id/fixed", async (c) => {
+  const body = z.object({ fixed: z.boolean(), note: z.string().trim().max(500).optional(), by: Reviewer })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ error: "Say whether it's fixed; notes up to 500 characters." }, 400);
+  const check = ownCheck(c, c.req.param("id"));
+  if (!check) return c.json({ error: "Check not found." }, 404);
+  try {
+    setFixed(check, body.data.fixed, body.data.note || null, body.data.by);
+  } catch (e) {
+    const f = failure(e);
+    return c.json({ error: f.error }, f.status);
+  }
+  return c.json(checkJson(getCheck(check.id)!, true));
+});
+
 // ---------- report: one scene's whole history in plain language ----------
 // Built from what is stored, with no model call: when each initial photo was set, then every inspection oldest first
 // with its Muse Wonder summary, the problems a person confirmed, what is still to decide, and the review trail.
@@ -647,6 +671,7 @@ function reportOf(scene: SceneRow) {
       confirmed: trail.filter((r) => DECIDED.confirmed.includes(r.action)).length,
       dismissed: trail.filter((r) => DECIDED.dismissed.includes(r.action)).length,
       reviewed: c.review_status === "reviewed" && lastReview ? { by: lastReview.action === "auto_reviewed" ? null : lastReview.by, at: lastReview.at } : null,
+      fixed: c.fixed_at ? { by: trail.filter((r) => r.action === "fixed").at(-1)?.by ?? null, at: c.fixed_at } : null,
       notes: trail.filter((r) => r.note).map((r) => ({ note: r.note!, by: r.by, at: r.at })),
     };
   });

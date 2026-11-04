@@ -9,7 +9,7 @@ import { z } from "zod";
 import { type SceneRow, db, getScene } from "../db.js";
 import { nowIso } from "../ids.js";
 import { bus } from "../runlog.js";
-import { type AreaRow, type InspectionRow, getInspection, inspectionDir, listAreas, newVideoId, pruneInspection } from "./db.js";
+import { type AreaRow, type InspectionRow, frameAspect, getInspection, inspectionDir, listAreas, newVideoId, pruneInspection } from "./db.js";
 import { motionOf } from "./motion.js";
 import { runInspection } from "./pipeline.js";
 import { type AppEnv, access, sceneIn } from "../workspaces.js";
@@ -133,15 +133,14 @@ videoApp.delete("/api/video/inspections/:id/scenes/:sceneId", (c) => {
 });
 
 // How the picture moves through the video (server/video/motion.ts), so its outlines can follow their objects.
-// Measured on first request and kept; the frames' shape comes from the video's checked frames.
+// Measured when the video is processed (server/video/pipeline.ts) and kept; this measures it if that didn't happen.
 videoApp.get("/api/video/inspections/:id/motion", async (c) => {
   const ins = ownInspection(c, c.req.param("id"));
   if (!ins || !existsSync(ins.video_path)) return c.json({ error: "Video not found." }, 404);
-  const frame = db.prepare(`SELECT s.w, s.h FROM video_frames f JOIN checks k ON k.id = f.check_id JOIN snapshots s ON s.id = k.snapshot_id
-    WHERE f.inspection_id = ? LIMIT 1`).get(ins.id) as { w: number; h: number } | undefined;
-  if (!frame) return c.json({ error: "Nothing in this video was checked." }, 404);
+  const aspect = frameAspect(ins.id);
+  if (!aspect) return c.json({ error: "Nothing in this video was checked." }, 404);
   c.header("Cache-Control", "private, max-age=86400");
-  return c.json(await motionOf(ins.video_path, frame.w / frame.h));
+  return c.json(await motionOf(ins.video_path, aspect));
 });
 
 // ---------- live updates and media ----------

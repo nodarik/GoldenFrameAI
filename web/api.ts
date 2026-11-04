@@ -18,6 +18,7 @@ export type LastCheck = { id: string; status: CheckStatus; reviewStatus: ReviewS
 export type SceneSummary = {
   id: string; name: string; group: string; assignee: string; createdAt: string; golden: Media | null;
   itemCount: number; ruleCount: number; toReview: number; checkCount: number; lastCheck: LastCheck | null;
+  openIssues: number; // confirmed on reviewed inspections and not marked fixed yet
   photoCount: number; videoCount: number; photoToReview: number; videoToReview: number;
 };
 export type Scene = { id: string; name: string; group: string; assignee: string; golden: Media | null; items: Item[]; checklist: Rule[] };
@@ -46,6 +47,7 @@ export type CheckSummary = {
   // takenAt: when the camera took the photo (EXIF), else when it was uploaded. Inspections are listed by it.
   id: string; sceneId: string; status: CheckStatus; createdAt: string; takenAt: string; costUsd: number;
   reviewStatus: ReviewStatus; reviewedAt: string | null; issues: number; flags: number; source: Source;
+  fixedAt: string | null; // a person marked this inspection's issues fixed
   uploadedBy: string | null; // the name someone gave on an upload link (or `?by=` on the API)
   // The initial photo, watched items or checklist changed after this check ran: re-check to include the changes.
   outdated: boolean;
@@ -178,17 +180,17 @@ export const COLUMNS: { id: Column; title: string; hint: string }[] = [
   { id: "setup", title: "Not set up", hint: "Needs an initial photo and something to watch or a checklist" },
   { id: "ready", title: "Ready", hint: "Set up, no inspection yet" },
   { id: "review", title: "Needs review", hint: "An inspection waits for a person" },
-  { id: "issues", title: "Issues", hint: "Reviewed, and a person confirmed something needs fixing" },
-  { id: "reviewed", title: "Reviewed", hint: "Latest inspection reviewed and clean" },
+  { id: "issues", title: "Issues", hint: "A person confirmed something needs fixing, and it isn't marked fixed yet" },
+  { id: "reviewed", title: "Reviewed", hint: "Everything reviewed, no open issues" },
 ];
 export function columnOf(s: SceneSummary): Column {
   if (!s.golden || (s.itemCount === 0 && s.ruleCount === 0)) return "setup";
   if (!s.lastCheck) return "ready";
   if (s.toReview > 0 || s.lastCheck.reviewStatus === "needs_review") return "review";
-  // Reviewed from here on. A retake or failed check the reviewer accepted is done; only problems they confirmed
-  // (issues found, rules failed) keep the scene in Issues.
-  if (s.lastCheck.issues > 0) return "issues";
-  return "reviewed";
+  // Reviewed from here on. A retake or failed check the reviewer accepted is done; problems they confirmed (issues
+  // found, rules failed) on any inspection keep the scene in Issues until someone marks them fixed, even after a newer
+  // inspection came back clean.
+  return s.openIssues > 0 ? "issues" : "reviewed";
 }
 
 export const STATUS_LABEL: Record<CheckStatus, string> = {

@@ -1,7 +1,6 @@
-// One scene, top to bottom: every inspection (list on the left, the selected
-// inspection's checklist and review on the right), then the standard it is checked
-// against: the initial photo with everything we watch on the left, the written
-// checklist on the right. Each section collapses.
+// One scene, in three tabs: the standard it is checked against (the initial photo with everything we watch on the
+// left, the written checklist on the right), every inspection (list on the left, the selected inspection's checklist
+// and review on the right), and the report of its whole history. Until it has an initial photo, only the first.
 import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, type VideoNotice, api, ago, getReviewer, plural, post, uploadForm, uploadVideo, useStream } from "./api.js";
 import { DeleteSceneDialog, Dialog, Menu, PersonIcon, SceneDialog } from "./board.js";
@@ -10,7 +9,10 @@ import { AnnotatedPhoto } from "./photo.js";
 import { ReportPanel } from "./report.js";
 import QRCode from "qrcode";
 
-export function ScenePage({ id, checkId, tab = "inspections", groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; tab?: "inspections" | "report"; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
+export type SceneTab = "setup" | "inspections" | "report";
+const TABS: [SceneTab, string][] = [["setup", "Initial photo & checklist"], ["inspections", "Inspections"], ["report", "Report"]];
+
+export function ScenePage({ id, checkId, tab = "inspections", groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; tab?: SceneTab; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"edit" | "delete" | "integration" | null>(null);
@@ -42,17 +44,15 @@ export function ScenePage({ id, checkId, tab = "inspections", groups, assignees 
 
       {scene.golden && (
         <nav className="scene-tabs" aria-label="Scene views">
-          <a href={`#/scenes/${id}`} className={tab === "inspections" ? "on" : ""} aria-current={tab === "inspections" ? "page" : undefined}>Inspections</a>
-          <a href={`#/scenes/${id}/report`} className={tab === "report" ? "on" : ""} aria-current={tab === "report" ? "page" : undefined}>Report</a>
+          {TABS.map(([t, label]) => (
+            <a key={t} href={`#/scenes/${id}${t === "inspections" ? "" : `/${t}`}`} className={tab === t ? "on" : ""} aria-current={tab === t ? "page" : undefined}>{label}</a>
+          ))}
         </nav>
       )}
-      {tab === "report" && scene.golden ? <ReportPanel scene={scene} /> : (
-        <>
-          {scene.golden && <InspectionsPanel scene={scene} checkId={checkId} onError={setError} />}
-          <GoldenPanel scene={scene} reload={load} onError={setError}
-            checklist={<Checklist scene={scene} onSaved={(checklist) => { setScene({ ...scene, checklist }); onScenesChange(); }} onError={setError} />} />
-        </>
-      )}
+      {!scene.golden || tab === "setup" ? (
+        <GoldenPanel scene={scene} reload={load} onError={setError}
+          checklist={<Checklist scene={scene} onSaved={(checklist) => { setScene({ ...scene, checklist }); onScenesChange(); }} onError={setError} />} />
+      ) : tab === "report" ? <ReportPanel scene={scene} /> : <InspectionsPanel scene={scene} checkId={checkId} onError={setError} />}
 
       {dialog === "edit" && (
         <SceneDialog scene={scene} groups={groups} assignees={assignees} onClose={() => setDialog(null)}
@@ -290,16 +290,6 @@ function DigestSection({ sceneId, info, onChange, onError }: { sceneId: string; 
   );
 }
 
-// ---------- collapsible section ----------
-function CollapseButton({ collapsed, onToggle, label }: { collapsed: boolean; onToggle: () => void; label: string }) {
-  return (
-    <button type="button" className="icon collapse-btn" onClick={onToggle} aria-expanded={!collapsed}
-      aria-label={collapsed ? `Expand ${label}` : `Collapse ${label}`} title={collapsed ? `Expand ${label}` : `Collapse ${label}`}>
-      <span className="toggle" aria-hidden="true">{collapsed ? "+" : "−"}</span>
-    </button>
-  );
-}
-
 // ---------- initial photo + what we watch, with the checklist beside it ----------
 function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; reload: () => Promise<unknown>; onError: (m: string) => void; checklist: ReactNode }) {
   const [busy, setBusy] = useState<"upload" | "detect" | null>(null);
@@ -307,7 +297,6 @@ function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; relo
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
   const [active, setActive] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const g = scene.golden;
 
@@ -335,6 +324,8 @@ function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; relo
     try {
       await uploadForm(`/api/scenes/${scene.id}/golden`, body, setProgress);
       setProgress(null);
+      // A first initial photo makes the scene's tabs appear; stay on this one while its objects are found.
+      if (!g) location.replace(`#/scenes/${scene.id}/setup`);
       await reload();
       await detect();
     } catch (err) {
@@ -419,26 +410,18 @@ function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; relo
     : pending ? "Outlining that object, naming it and counting matches…" : null;
 
   return (
-    <section className={`panel golden${collapsed ? " collapsed" : ""}`}>
+    <section className="panel golden">
       {input}
-      <div className="panel-head">
-        <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Initial photo and checklist" />
-        <div style={{ flex: 1 }}>
-          <h2>Initial photo &amp; checklist</h2>
-          <p className="muted">The standard every inspection is checked against: the objects SAM counts on the photo, and the rules Spark checks.</p>
-        </div>
-      </div>
-      {!collapsed && (
       <div className="setup-body">
       <div className="setup-photo">
       <div className="setup-head">
-        <h3>Initial photo</h3>
+        <h2>Set initial photo</h2>
         <div className="row">
           <button onClick={detect} disabled={!!busy || !!pending}>Find objects</button>
           <button onClick={replace} disabled={!!busy}>Replace photo</button>
         </div>
       </div>
-      <p className="muted small">Hover an object to see what we watch, click one to edit it and drag its box; click empty space to add an object.</p>
+      <p className="muted small">Click an object to edit it, or empty space to add one.</p>
       {status && (
         <div className="banner info" role={busy === "upload" ? "progressbar" : undefined}
           aria-valuemin={busy === "upload" ? 0 : undefined} aria-valuemax={busy === "upload" ? 100 : undefined}
@@ -471,7 +454,6 @@ function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; relo
       </div>
       <div className="setup-side">{checklist}</div>
       </div>
-      )}
     </section>
   );
 }
@@ -528,6 +510,7 @@ function Checklist({ scene, onSaved, onError }: { scene: Scene; onSaved: (rules:
   const [section, setSection] = useState(sections[0] ?? NEW_SECTION);
   const [newSection, setNewSection] = useState("");
   const [drafting, setDrafting] = useState(false);
+  const [watchedOnly, setWatchedOnly] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(() => new Set());
   const toggle = (name: string) =>
     setClosed((prev) => {
@@ -565,10 +548,12 @@ function Checklist({ scene, onSaved, onError }: { scene: Scene; onSaved: (rules:
       });
     }
   };
-  const wonder = async () => {
+  // A draft replaces the checklist (the server keeps the old one if drafting fails).
+  const wonder = async (size: "short" | "standard" | "thorough") => {
+    if (rules.length && !confirm(`Replace the ${plural(rules.length, "rule")} in this checklist with a new draft? The current rules will be deleted.`)) return;
     setDrafting(true);
     try {
-      const r = await post<{ checklist: Rule[] }>(`/api/scenes/${scene.id}/checklist/draft`, {});
+      const r = await post<{ checklist: Rule[] }>(`/api/scenes/${scene.id}/checklist/draft`, { size, watchedOnly: watchedOnly && scene.items.length > 0 });
       onSaved(r.checklist);
       setClosed(new Set());
     } catch (err) {
@@ -582,7 +567,19 @@ function Checklist({ scene, onSaved, onError }: { scene: Scene; onSaved: (rules:
     <>
       <div className="setup-head">
         <h3>Checklist <span className="count">{rules.length}</span></h3>
-        <button onClick={wonder} disabled={drafting}>{drafting ? "Muse Wonder is writing…" : "✦ Draft with Muse Wonder"}</button>
+        <div className="row">
+        <label className="check small" title={scene.items.length ? "Draft rules only about the objects in What we watch" : "Watch some objects on the photo first"}>
+          <input type="checkbox" checked={watchedOnly && scene.items.length > 0} disabled={!scene.items.length || drafting}
+            onChange={(e) => setWatchedOnly(e.target.checked)} /> Only watched objects
+        </label>
+        {drafting ? <button disabled>Muse Wonder is writing…</button> : (
+          <Menu label="Draft with Muse Wonder" text="✦ Draft with Muse Wonder" items={[
+            { label: "Short: the 3–5 rules that matter most", run: () => void wonder("short") },
+            { label: "Standard: about 10 rules", run: () => void wonder("standard") },
+            { label: "Thorough: up to 30 rules", run: () => void wonder("thorough") },
+          ]} />
+        )}
+        </div>
       </div>
       <p className="muted small">What must be true, beyond the watched objects. Spark checks every rule on every inspection.</p>
       {rules.length === 0 && <p className="muted small">No rules yet. Draft a starter checklist from the initial photo, or write your own below.</p>}
@@ -646,7 +643,6 @@ type Filter = "all" | "needs_review" | "reviewed";
 function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: string | null; onError: (m: string) => void }) {
   const [checks, setChecks] = useState<CheckSummary[] | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
-  const [collapsed, setCollapsed] = useState(false);
   const load = useCallback(() => api<CheckSummary[]>(`/api/scenes/${scene.id}/checks?limit=100`).then(setChecks).catch(() => {}), [scene.id]);
   useEffect(() => void load(), [load]);
   useStream<{ sceneId: string }>("check", (e) => e.sceneId === scene.id && void load());
@@ -732,9 +728,8 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
   };
 
   return (
-    <section className={`panel inspections${collapsed ? " collapsed" : ""}`} id="inspections">
+    <section className="panel inspections" id="inspections">
       <div className="panel-head">
-        <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Inspections" />
         <div style={{ flex: 1 }}>
           <h2>Inspections</h2>
           <p className="muted">Every photo and video frame checked against the initial photo. A person marks each one reviewed.</p>
@@ -743,8 +738,6 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
           {outdated.length > 0 && <button onClick={recheckOutdated} disabled={rechecking}>{rechecking ? "Starting…" : `Re-check ${outdated.length} outdated`}</button>}
         </div>
       </div>
-      {!collapsed && (
-      <>
       <VideoNotices sceneId={scene.id} onError={onError} />
       {checks && checks.length === 0 ? (
         <div className="empty small">
@@ -776,7 +769,9 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
                       <span className="muted small">{ago(c.takenAt)}{c.uploadedBy && ` · ${c.uploadedBy}`}</span>
                       <span className="irow-tags">
                         <ReviewPill c={c} />
-                        {c.issues > 0 && <span className="tag-issue">{plural(c.issues, "issue")}</span>}
+                        {c.issues > 0 && (c.fixedAt
+                          ? <span className="tag-fixed">{plural(c.issues, "issue")} fixed</span>
+                          : <span className="tag-issue">{plural(c.issues, "issue")}</span>)}
                         {c.flags > 0 && <span className="tag-review">{c.flags} to decide</span>}
                         {c.outdated && <span className="tag-outdated" title="The setup changed after this inspection was checked">Outdated</span>}
                       </span>
@@ -794,8 +789,6 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
               onDeleted={handleDetailDeleted} /> : <p className="muted">Choose an inspection.</p>}
           </div>
         </div>
-      )}
-      </>
       )}
     </section>
   );

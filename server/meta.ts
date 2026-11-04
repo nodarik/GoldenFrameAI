@@ -230,14 +230,28 @@ export const SECOND_OPINION = {
 };
 
 // Muse Wonder, a starter checklist from the initial photo.
+// How long a drafted checklist is. `rules` caps what is kept, since a model asked for "3 to 5" sometimes writes more.
+export const DRAFT_SIZES = {
+  short: { rules: 5, prompt: "Write only the 3 to 5 rules that matter most, the ones a manager would fail the inspection for, in 1 or 2 sections." },
+  standard: { rules: 12, prompt: "Write 8 to 12 rules in 2 to 4 sections: what a careful inspector checks every time." },
+  thorough: { rules: 30, prompt: "Write a full checklist of 20 to 30 rules in 3 to 6 sections, smaller details included." },
+} as const;
+export type DraftSize = keyof typeof DRAFT_SIZES;
+
 export const DRAFT_CHECKLIST = {
   name: "DraftChecklist",
   system:
     "This is the reference photo of a place in its correct state (a hotel room, restaurant or other business space). " +
-    "Write a starter inspection checklist that a person or a model can verify from one later photo taken from the same spot. " +
-    "Always return between 2 and 6 sections, named after parts of the scene in upper case (e.g. 'THE BED', 'NIGHTSTAND & TECH'). Never return an empty list. " +
-    "Each section has 2 to 6 rules. Each rule is one short, concrete, visible fact (e.g. 'Duvet is smooth and centred on the bed'). " +
-    "Watched items listed by the user are already counted, so write about their state instead (made, straight, clean, switched on, closed). Do not mention people.",
+    "Write an inspection checklist that a person or a model can verify from one later photo taken from the same spot. " +
+    "Only include what can go wrong between inspections and matters to a guest or customer: made, clean, tidy, in its place, closed, switched on or off, stocked. " +
+    "Skip permanent features that can't go wrong (wall colour, flooring, built-in fixtures, the view), anything not visible in the photo, and near-duplicates of another rule. " +
+    "Name sections after parts of the scene in upper case (e.g. 'THE BED', 'NIGHTSTAND & TECH'). Never return an empty list. " +
+    "Each rule is one short, concrete, visible fact (e.g. 'Duvet is smooth and centred on the bed'). " +
+    "Watched items listed by the user are already counted, so write about their state instead. Do not mention people.",
+  // Added when the checklist should cover only the watched items.
+  watchedOnly:
+    "Write rules only about the watched items listed by the user (their state, position and cleanliness, and what is on or in them), " +
+    "nothing about anything else in the scene. Name sections after those items or groups of them.",
   jsonSchema: {
     type: "object", additionalProperties: false, required: ["sections"],
     properties: {

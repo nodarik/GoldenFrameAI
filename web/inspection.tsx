@@ -27,10 +27,11 @@ export function SourceIcon({ source }: { source: Source }) {
 // clipped), so outlines and checklist hover highlighting keep working on each
 // side. Both layers share the inspection photo's frame; the golden layer
 // stretches slightly when the two photos' aspects differ, and outlines stay
-// aligned because boxes are relative to each photo.
-function CompareSlider({ golden, snapshot, goldenShapes, newShapes, active, onActive, frame, rightLabel }: {
+// aligned because boxes are relative to each photo. `surface` puts something else on the right in place of the
+// inspection photo: the video a frame came from.
+function CompareSlider({ golden, snapshot, goldenShapes, newShapes, active, onActive, frame, rightLabel, surface }: {
   golden: Media; snapshot: Media; goldenShapes: Shape[]; newShapes: Shape[];
-  active: string | null; onActive: (id: string | null) => void; frame: UnitBox | null; rightLabel: string;
+  active: string | null; onActive: (id: string | null) => void; frame: UnitBox | null; rightLabel: string; surface?: ReactNode;
 }) {
   const [pos, setPos] = useState(10);
   const ref = useRef<HTMLDivElement>(null);
@@ -50,7 +51,7 @@ function CompareSlider({ golden, snapshot, goldenShapes, newShapes, active, onAc
         <AnnotatedPhoto media={golden} label="Initial photo" shapes={goldenShapes} active={active} onActive={onActive} />
       </div>
       <div className="ba-layer" style={{ clipPath: `inset(0 0 0 ${pos}%)` }}>
-        <AnnotatedPhoto media={snapshot} label="Inspection photo" shapes={newShapes} active={active} onActive={onActive} frame={frame} />
+        <AnnotatedPhoto media={snapshot} label="Inspection photo" shapes={newShapes} active={active} onActive={onActive} frame={frame} surface={surface} />
       </div>
       <span className="ba-tag ba-tag-left">Initial</span>
       <span className="ba-tag ba-tag-right">{rightLabel}</span>
@@ -91,22 +92,24 @@ function inspectionShapes(r: Check["result"]): Shape[] {
 // they show only right around the moment: a handheld camera has moved on a second later.
 const TRACK_MS = 10_000;
 const NEAR_MS = 750;
-const LEAD_IN_S = 2; // start a little before the frame, so the outlines appear as the video reaches it
-const MAX_VIDEO_H = 360;
 
 type Visit = { ms: number; check: Check; shapes: Shape[]; tracks: Track[][] | null };
 
-// The video this frame came from, playing with outlines drawn on it that move with their objects, from every moment
-// of it that was checked for this scene (this frame and the scene's other visits in the same video). Markers under
-// it jump to each moment.
-function VideoWithOutlines({ check, inspectionId, frameMs, active, onActive }: {
-  check: Check; inspectionId: string; frameMs: number; active: string | null; onActive: (id: string | null) => void;
+// A video inspection's before/after: the initial photo against the video the frame came from, paused on that frame
+// and playable, with outlines that move with their objects, from every moment of it that was checked for this scene
+// (this frame and the scene's other visits in the same video). The bar under it plays, seeks and jumps to each moment;
+// the player has no controls of its own, since the slider takes every click on the picture.
+function VideoCompare({ check, inspectionId, frameMs, golden, goldenShapes, frame, active, onActive }: {
+  check: Check; inspectionId: string; frameMs: number; golden: Media; goldenShapes: Shape[]; frame: UnitBox | null;
+  active: string | null; onActive: (id: string | null) => void;
 }) {
   const ref = useRef<HTMLVideoElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
   const [others, setOthers] = useState<{ ms: number; check: Check }[]>([]);
   const [motion, setMotion] = useState<Motion | "failed" | null>(null);
-  const [t, setT] = useState(Math.max(0, frameMs - LEAD_IN_S * 1000));
+  const [t, setT] = useState(frameMs);
   const [durationMs, setDurationMs] = useState<number | null>(null);
+  const [playing, setPlaying] = useState(false);
   useEffect(() => {
     let live = true;
     api<Video>(`/api/video/inspections/${inspectionId}`).then(async (v) => {
@@ -123,13 +126,13 @@ function VideoWithOutlines({ check, inspectionId, frameMs, active, onActive }: {
   useEffect(() => {
     let raf = 0, last = -1;
     const tick = () => {
-      const ms = (ref.current?.currentTime ?? 0) * 1000;
+      const ms = (ref.current?.currentTime ?? frameMs / 1000) * 1000;
       if (ms !== last) setT((last = ms));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [frameMs]);
 
   const m = typeof motion === "object" ? motion : null;
   const visits: Visit[] = useMemo(() => [{ ms: frameMs, check }, ...others].sort((a, b) => a.ms - b.ms).map((v) => {
@@ -140,47 +143,68 @@ function VideoWithOutlines({ check, inspectionId, frameMs, active, onActive }: {
 
   const near = visits.reduce((a, b) => (Math.abs(b.ms - t) < Math.abs(a.ms - t) ? b : a));
   const on = Math.abs(near.ms - t) <= (near.tracks ? TRACK_MS : NEAR_MS);
-  const media = near.check.snapshot;
+  const atFrame = Math.abs(frameMs - t) < 50; // this inspection's own frame: its masks and framing guide fit exactly
   let shapes: Shape[] = [];
   if (on && near.tracks && m) {
-    const f = (t / 1000) * m.fps, still = Math.abs(near.ms - t) < 500 / m.fps; // masks only on the checked frame itself
+    const f = (t / 1000) * m.fps, still = Math.abs(near.ms - t) < 500 / m.fps; // masks only on a checked frame itself
     shapes = near.shapes.flatMap((s, i) => {
       const boxes = near.tracks![i].map((tr) => boxAt(tr, f)).filter((b): b is UnitBox => !!b);
       return boxes.length ? [{ ...s, boxes, masks: still ? s.masks : undefined }] : [];
     });
   } else if (on) shapes = near.shapes;
-  const jump = (ms: number) => {
+
+  const seek = (ms: number) => {
     const v = ref.current;
     if (!v) return;
-    v.pause();
     v.currentTime = ms / 1000;
+    setT(ms);
+  };
+  const jump = (ms: number) => { ref.current?.pause(); seek(ms); };
+  const seekAt = (clientX: number) => {
+    const r = trackRef.current?.getBoundingClientRect();
+    if (r && r.width && durationMs) seek(Math.min(1, Math.max(0, (clientX - r.left) / r.width)) * durationMs);
+  };
+  const toggle = () => {
+    const v = ref.current;
+    if (v) void (v.paused ? v.play() : v.pause());
   };
 
   return (
-    <div className="video-outlines" style={{ maxWidth: (MAX_VIDEO_H * media.w) / media.h }}>
-      <AnnotatedPhoto media={media} label="Inspection video" shapes={shapes} active={active} onActive={onActive}
+    // While it plays, only the labels ride along on the video (the rectangles come back when it's paused).
+    <div className={playing ? "video-playing" : undefined}>
+      <CompareSlider golden={golden} snapshot={check.snapshot} goldenShapes={goldenShapes} newShapes={shapes}
+        active={active} onActive={onActive} frame={atFrame ? frame : null} rightLabel="Video"
         surface={
-          // #t= starts the player just before the frame; the media route supports Range requests, so seeking works.
-          <video ref={ref} src={`/media/video/${inspectionId}#t=${Math.max(0, frameMs / 1000 - LEAD_IN_S)}`}
-            style={{ aspectRatio: `${media.w} / ${media.h}` }} controls autoPlay muted playsInline preload="metadata" aria-label="Inspection video"
+          // #t= opens the player on the checked frame; the media route supports Range requests, so seeking works.
+          <video ref={ref} src={`/media/video/${inspectionId}#t=${frameMs / 1000}`} muted playsInline preload="auto" aria-label="Inspection video"
             onLoadedMetadata={(e) => setDurationMs(e.currentTarget.duration * 1000)}
+            onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)}
             onSeeked={(e) => setT(e.currentTarget.currentTime * 1000)} onTimeUpdate={(e) => setT(e.currentTarget.currentTime * 1000)} />
         } />
-      {durationMs !== null && durationMs > 0 && (
-        <div className="moments">
-          <span className="muted small">
-            {motion === null ? "Following the objects through the video…"
-              : m ? "Outlines follow their objects around each checked moment:" : "Outlines show at the checked moments:"}
-          </span>
-          <div className="moments-track">
-            {visits.map((v) => (
-              <button key={v.check.id} type="button" className={`moment${v.check.id === check.id ? " is-this" : ""}${v === near && on ? " is-on" : ""}`}
-                style={{ left: `${Math.min(100, (v.ms / durationMs) * 100)}%` }} onClick={() => jump(v.ms)}
-                aria-label={`Show the moment at ${clock(v.ms)}${v.check.id === check.id ? " (this inspection)" : ""}`} title={clock(v.ms)} />
-            ))}
-          </div>
+      <div className="video-bar">
+        <button type="button" className="sm video-play" onClick={toggle} aria-label={playing ? "Pause video" : "Play video"}>
+          {playing
+            ? <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" /><rect x="14" y="5" width="4" height="14" rx="1" /></svg>
+            : <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 5v14l12-7z" /></svg>}
+        </button>
+        <span className="small muted video-time">{clock(t)}{durationMs ? ` / ${clock(durationMs)}` : ""}</span>
+        <div ref={trackRef} className="moments-track" role="slider" tabIndex={0} aria-label="Video position"
+          aria-valuemin={0} aria-valuemax={Math.round((durationMs ?? 0) / 1000)} aria-valuenow={Math.round(t / 1000)} aria-valuetext={clock(t)}
+          title={motion === null ? "Following the objects through the video…" : m ? "Outlines follow their objects around each checked moment (dots)" : "Outlines show at the checked moments (dots)"}
+          onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); seekAt(e.clientX); }}
+          onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) seekAt(e.clientX); }}
+          onKeyDown={(e) => {
+            const d = { ArrowLeft: -1000, ArrowRight: 1000 }[e.key];
+            if (d && durationMs) { e.preventDefault(); seek(Math.min(durationMs, Math.max(0, t + d))); }
+          }}>
+          {durationMs ? <div className="moments-progress" style={{ width: `${Math.min(100, (t / durationMs) * 100)}%` }} /> : null}
+          {durationMs ? visits.map((v) => (
+            <button key={v.check.id} type="button" className={`moment${v.check.id === check.id ? " is-this" : ""}${v === near && on ? " is-on" : ""}`}
+              style={{ left: `${Math.min(100, (v.ms / durationMs) * 100)}%` }} onPointerDown={(e) => e.stopPropagation()} onClick={() => jump(v.ms)}
+              aria-label={`Show the moment at ${clock(v.ms)}${v.check.id === check.id ? " (this inspection)" : ""}`} title={clock(v.ms)} />
+          )) : null}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -190,9 +214,8 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
   const [error, setError] = useState("");
   const [active, setActive] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [watching, setWatching] = useState(false);
   const load = useCallback(() => api<Check>(`/api/checks/${id}`).then((c) => { setCheck(c); setError(""); }).catch((e) => { setCheck(null); setError(e.message); }), [id]);
-  useEffect(() => { setCheck(null); setError(""); setActive(null); setWatching(false); void load(); }, [load]);
+  useEffect(() => { setCheck(null); setError(""); setActive(null); void load(); }, [load]);
   useStream<{ id: string }>("check", (e) => e.id === id && void load());
 
   const act = async (path: string, body: object) => {
@@ -248,7 +271,7 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
   const total = items.length + rules.length;
 
   // Outlines, keyed so hovering a checklist row lights its outline on both photos, and back.
-  const newShapes = inspectionShapes(r);
+  const framingGuide = r.alignment?.frame && r.alignment.level !== "aligned" ? r.alignment.frame : null;
   const goldenShapes: Shape[] = [
     ...items.map((i) => ({ id: `item:${i.itemId}`, label: i.name, sub: `${i.expected} expected`, tone: "muted" as Tone, boxes: i.goldenBoxes })),
     ...findings.filter((f) => f.goldenBoxes.length && f.status !== "rejected").map((f) => ({
@@ -277,13 +300,9 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
               ? <>Taken {when(check.takenAt)} · uploaded {when(check.createdAt)}</> : when(check.createdAt)} · {STATUS_LABEL[check.status]}
             {check.uploadedBy && <> · sent by {check.uploadedBy}</>}
             {check.source.type === "video" && check.source.frameMs !== null && (
-              <> · frame at {clock(check.source.frameMs)} · <button type="button" className="link" aria-expanded={watching}
-                onClick={() => setWatching(!watching)}>{watching ? "Hide video" : "▶ Watch video"}</button></>
+              <> · frame at {clock(check.source.frameMs)}</>
             )}
           </div>
-          {watching && check.source.type === "video" && check.source.frameMs !== null && (
-            <VideoWithOutlines check={check} inspectionId={check.source.inspectionId} frameMs={check.source.frameMs} active={active} onActive={setActive} />
-          )}
         </div>
         {done && total > 0 && check.status !== "retake" && (
           <div className="progress-box">
@@ -294,6 +313,16 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
         )}
         <div className="row wrap head-actions">
           {check.status !== "running" && <ReviewStatusButtons check={check} onSet={(status, note) => act(`/api/checks/${id}/review`, { status, note })} />}
+          {/* Confirmed issues keep the scene in Issues until a person says they were fixed. */}
+          {check.reviewStatus === "reviewed" && check.issues > 0 && (check.fixedAt ? (
+            <span className="row fixed-state">
+              <span className="pill pill-reviewed" title={`Marked fixed ${when(check.fixedAt)}`}>✓ Fixed</span>
+              <button type="button" className="link small" onClick={() => act(`/api/checks/${id}/fixed`, { fixed: false })}>Undo</button>
+            </span>
+          ) : (
+            <button type="button" className="sm primary" onClick={() => act(`/api/checks/${id}/fixed`, { fixed: true })}
+              title="The confirmed issues were fixed: the scene leaves Issues once none are open">Mark fixed</button>
+          ))}
           <button type="button" className="ghost danger sm" onClick={remove} disabled={deleting || check.status === "running"}
             title={check.status === "running" ? "Wait until the check finishes." : "Delete this inspection"}>
             {deleting ? "Deleting…" : "Delete"}
@@ -327,9 +356,13 @@ export function InspectionDetail({ id, onChanged, onDeleted }: { id: string; onC
 
       <div className="detail-body">
         <div className="detail-photos">
-          <CompareSlider golden={check.golden} snapshot={check.snapshot} goldenShapes={goldenShapes} newShapes={newShapes}
-            active={active} onActive={setActive} frame={r.alignment?.frame && r.alignment.level !== "aligned" ? r.alignment.frame : null}
-            rightLabel={check.source.type === "video" ? "Video frame" : "Inspection photo"} />
+          {check.source.type === "video" && check.source.frameMs !== null ? (
+            <VideoCompare check={check} inspectionId={check.source.inspectionId} frameMs={check.source.frameMs}
+              golden={check.golden} goldenShapes={goldenShapes} frame={framingGuide} active={active} onActive={setActive} />
+          ) : (
+            <CompareSlider golden={check.golden} snapshot={check.snapshot} goldenShapes={goldenShapes} newShapes={inspectionShapes(r)}
+              active={active} onActive={setActive} frame={framingGuide} rightLabel="Inspection photo" />
+          )}
         </div>
 
         {done && check.status !== "retake" && (
@@ -506,6 +539,7 @@ function NoteComposer({ check, onSet }: { check: Check; onSet: (status: "needs_r
 
 const ACTION: Record<string, string> = {
   reviewed: "Marked reviewed", needs_review: "Marked needs review", auto_reviewed: "Reviewed automatically", note: "Note",
+  fixed: "Marked fixed", unfixed: "Marked not fixed",
   rechecked: "Re-checked", finding_confirmed: "Confirmed issue", finding_rejected: "Dismissed", rule_confirmed: "Rule failed", rule_rejected: "Rule passed",
 };
 

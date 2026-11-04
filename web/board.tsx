@@ -1,14 +1,32 @@
-// Scenes board: one column per next step (set up, inspect, review, fix, done), plus the add/edit/delete dialogs.
+// Scenes board: one column per next step (set up, inspect, review, fix, done), or the same scenes as a compact list in
+// that order, plus the add/edit/delete dialogs.
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { COLUMNS, type SceneSummary, type Video, ago, api, columnOf, plural, uploadVideo, useStream } from "./api.js";
 
+type View = "board" | "list";
+const VIEW_KEY = "truescene.scenesView";
+const UNASSIGNED = "\u0000unassigned"; // can't clash with a typed name
+const savedView = (): View => {
+  try { return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "board"; } catch { return "board"; }
+};
+
 export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | null; group: string | null; onChange: () => void }) {
+  const [view, setViewState] = useState<View>(savedView);
+  const setView = (v: View) => {
+    setViewState(v);
+    try { localStorage.setItem(VIEW_KEY, v); } catch { /* the choice just isn't remembered */ }
+  };
   const [editing, setEditing] = useState<SceneSummary | "new" | null>(null);
   const [deleting, setDeleting] = useState<SceneSummary | null>(null);
   const [error, setError] = useState("");
   const [videoId, setVideoId] = useState<string | null>(null);
   useEffect(() => { setVideoId(null); setError(""); }, [group]);
-  const shown = (scenes ?? []).filter((s) => group === null || s.group === group);
+  // "" = everyone, UNASSIGNED = scenes without a person, otherwise one person's scenes. Kept across groups.
+  const [assignee, setAssignee] = useState("");
+  const inGroup = (scenes ?? []).filter((s) => group === null || s.group === group);
+  const people = [...new Set(inGroup.map((s) => s.assignee).filter(Boolean))].sort();
+  const unassigned = inGroup.filter((s) => !s.assignee).length;
+  const shown = inGroup.filter((s) => assignee === "" || (assignee === UNASSIGNED ? !s.assignee : s.assignee === assignee));
   const byColumn = new Map(COLUMNS.map((c) => [c.id, shown.filter((s) => columnOf(s) === c.id)]));
   const reviewed = byColumn.get("reviewed")!.length;
 
@@ -26,7 +44,22 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
           <div><b>{byColumn.get("review")!.length}</b><span>To review</span></div>
           <div><b>{reviewed}</b><span>Reviewed</span></div>
           <div><b>{shown.length}</b><span>Total</span></div>
-          {group !== null && <GroupVideoButton sceneIds={shown.filter((s) => s.golden).map((s) => s.id)} onError={setError} onStarted={setVideoId} />}
+          <select value={assignee} onChange={(e) => setAssignee(e.target.value)} aria-label="Filter by assignee">
+            <option value="">Everyone</option>
+            {/* A person picked in another group stays listed (with 0) so the select never shows a value it lacks. */}
+            {[...new Set([...people, ...(assignee && assignee !== UNASSIGNED ? [assignee] : [])])].sort().map((p) => (
+              <option key={p} value={p}>{p} ({inGroup.filter((s) => s.assignee === p).length})</option>
+            ))}
+            {(unassigned > 0 || assignee === UNASSIGNED) && <option value={UNASSIGNED}>Unassigned ({unassigned})</option>}
+          </select>
+          <div className="seg" role="radiogroup" aria-label="View">
+            {(["board", "list"] as View[]).map((v) => (
+              <button key={v} role="radio" aria-checked={view === v} className={view === v ? "on" : undefined} onClick={() => setView(v)}>
+                {v === "board" ? "Board" : "List"}
+              </button>
+            ))}
+          </div>
+          {group !== null && <GroupVideoButton sceneIds={inGroup.filter((s) => s.golden).map((s) => s.id)} onError={setError} onStarted={setVideoId} />}
           <button className="primary" onClick={() => setEditing("new")}>+ Add scene</button>
         </div>
       </header>
@@ -41,7 +74,22 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
         </div>
       )}
 
-      {scenes && scenes.length > 0 && (
+      {scenes && scenes.length > 0 && shown.length === 0 && assignee !== "" && (
+        <p className="muted">
+          No scenes {assignee === UNASSIGNED ? "without an assignee" : `assigned to ${assignee}`} here.{" "}
+          <button className="ghost" onClick={() => setAssignee("")}>Show everyone</button>
+        </p>
+      )}
+
+      {scenes && scenes.length > 0 && view === "list" && (
+        <ul className="scene-list">
+          {COLUMNS.flatMap((col) => byColumn.get(col.id)!.map((s) => (
+            <SceneRow key={s.id} s={s} col={col} onEdit={() => setEditing(s)} onDelete={() => setDeleting(s)} />
+          )))}
+        </ul>
+      )}
+
+      {scenes && scenes.length > 0 && view === "board" && (
         <div className="board" role="list">
           {COLUMNS.map((col) => {
             const list = byColumn.get(col.id)!;
@@ -90,7 +138,7 @@ function cardNote(s: SceneSummary): CardLine {
     return { text: `${plural(total, "inspection")} · ${s.toReview} to review`, tone: "review" };
   }
   // Everything is reviewed here: a retake or failed check the reviewer accepted counts as done (see columnOf).
-  if (l.issues > 0) return { text: `${plural(total, "inspection")} · ${plural(l.issues, "issue")}`, tone: "issue" };
+  if (s.openIssues > 0) return { text: `${plural(total, "inspection")} · ${plural(s.openIssues, "open issue")}`, tone: "issue" };
   return { text: `${plural(total, "inspection")} · All good` };
 }
 
@@ -99,9 +147,8 @@ function cardLines(s: SceneSummary): { lines: CardLine[]; tone?: "issue" | "revi
   const photos = s.photoCount ?? 0, videos = s.videoCount ?? 0;
   if (photos > 0 && videos > 0 && s.lastCheck && (s.checkCount ?? 0) > 0) {
     const lines = [typeLine(photos, "photo", s.photoToReview ?? 0), typeLine(videos, "video", s.videoToReview ?? 0)];
-    const l = s.lastCheck;
     const tone = s.toReview > 0 ? "review" as const
-      : l.issues > 0 ? "issue" as const : undefined;
+      : s.openIssues > 0 ? "issue" as const : undefined;
     return { lines, tone };
   }
   const single = cardNote(s);
@@ -132,6 +179,28 @@ function SceneCard({ s, onEdit, onDelete }: { s: SceneSummary; onEdit: () => voi
         {s.group && <span className="chip">{s.group}</span>}
       </div>
     </article>
+  );
+}
+
+// The list view's row: the same facts as a card, on one line.
+function SceneRow({ s, col, onEdit, onDelete }: { s: SceneSummary; col: (typeof COLUMNS)[number]; onEdit: () => void; onDelete: () => void }) {
+  const note = cardLines(s);
+  return (
+    <li className="scene-row">
+      <a href={`#/scenes/${s.id}`} className="scene-card-link" aria-label={`Open ${s.name}`} />
+      {s.golden ? <img src={s.golden.url} alt="" loading="lazy" /> : <span className="row-thumb-empty" />}
+      <span className="row-name">
+        <b>{s.name}</b>
+        {s.group && <span className="chip">{s.group}</span>}
+      </span>
+      <span className={`row-status col-${col.id}`} title={col.hint}><span className="dot" /> {col.title}</span>
+      <span className="person row-person"><PersonIcon /> {s.assignee || <span className="muted">Unassigned</span>}</span>
+      <span className={`card-counts row-counts ${note.tone ?? ""}`}>
+        {note.lines.map((l) => <span key={l.text} className={l.tone ?? ""}>{l.text}</span>)}
+      </span>
+      <span className="muted small row-when">{s.lastCheck ? ago(s.lastCheck.createdAt) : ""}</span>
+      <Menu label={`Actions for ${s.name}`} items={[{ label: "Edit", run: onEdit }, { label: "Delete", run: onDelete, danger: true }]} />
+    </li>
   );
 }
 
@@ -286,16 +355,10 @@ export function SceneDialog({ scene, groups, assignees = [], defaultGroup = "", 
     <Dialog title={scene ? "Edit scene" : "Add scene"} onClose={onClose}>
       <form onSubmit={save} className="form">
         <label>Name<input type="text" value={name} maxLength={80} autoFocus placeholder="Room 1201 – bed" onChange={(e) => { setName(e.target.value); setError(""); }} /></label>
-        <label>Group <span className="muted">· location, floor or client</span>
-          <input type="text" value={group} maxLength={60} list="scene-groups" placeholder="The Continental – Floor 12"
-            autoComplete="off" onChange={(e) => setGroup(e.target.value)} />
-          <datalist id="scene-groups">{groups.map((g) => <option key={g} value={g} />)}</datalist>
-        </label>
-        <label>Assignee <span className="muted">· who keeps it right</span>
-          <input type="text" value={assignee} maxLength={60} list="scene-assignees" placeholder="Maria Santos"
-            autoComplete="off" onChange={(e) => setAssignee(e.target.value)} />
-          <datalist id="scene-assignees">{assignees.map((a) => <option key={a} value={a} />)}</datalist>
-        </label>
+        <PickOrAdd id="scene-group" label="Group" hint="location, floor or client" value={group} options={groups} onChange={setGroup}
+          none="No group" addLabel="+ New group…" placeholder="The Continental – Floor 12" />
+        <PickOrAdd id="scene-assignee" label="Assignee" hint="who keeps it right" value={assignee} options={assignees} onChange={setAssignee}
+          none="Unassigned" addLabel="+ New person…" placeholder="Maria Santos" />
         {error && <p className="err" role="alert">{error}</p>}
         <div className="row end">
           <button type="button" className="ghost" onClick={onClose}>Cancel</button>
@@ -303,6 +366,38 @@ export function SceneDialog({ scene, groups, assignees = [], defaultGroup = "", 
         </div>
       </form>
     </Dialog>
+  );
+}
+
+// A dropdown of the values already in use, plus "none" and "new": choosing new swaps it for a text field.
+function PickOrAdd({ id, label, hint, value, options, onChange, none, addLabel, placeholder }: {
+  id: string; label: string; hint: string; value: string; options: string[]; onChange: (v: string) => void;
+  none: string; addLabel: string; placeholder: string;
+}) {
+  const NEW = "\u0000new"; // can't clash with a real name
+  const [adding, setAdding] = useState(false);
+  const list = [...new Set([...options, value].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  return (
+    <div className="form" style={{ gap: 4 }}>
+      <label htmlFor={id}><span>{label} <span className="muted">· {hint}</span></span></label>
+      {adding ? (
+        <div className="row">
+          <input id={id} type="text" value={value} maxLength={60} placeholder={placeholder} autoFocus autoComplete="off"
+            onChange={(e) => onChange(e.target.value)} style={{ flex: 1 }} />
+          {list.length > 0 && <button type="button" className="ghost" onClick={() => { setAdding(false); onChange(""); }}>Choose from list</button>}
+        </div>
+      ) : (
+        <select id={id} value={value} onChange={(e) => {
+          if (e.target.value !== NEW) return onChange(e.target.value);
+          setAdding(true);
+          onChange("");
+        }}>
+          <option value="">{none}</option>
+          {list.map((o) => <option key={o} value={o}>{o}</option>)}
+          <option value={NEW}>{addLabel}</option>
+        </select>
+      )}
+    </div>
   );
 }
 

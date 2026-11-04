@@ -9,6 +9,7 @@ type ReportInspection = {
   score: { ok: number; total: number } | null; summary: string | null; error: string | null;
   problems: string[]; toDecide: string[]; confirmed: number; dismissed: number;
   reviewed: { by: string | null; at: string } | null;
+  fixed: { by: string | null; at: string } | null;
   notes: { note: string; by: string | null; at: string }[];
 };
 type Report = {
@@ -33,7 +34,8 @@ function reviewLine(i: ReportInspection) {
   if (i.status === "running") return "Being checked…";
   const decided = [i.confirmed && `${i.confirmed} confirmed`, i.dismissed && `${i.dismissed} dismissed`].filter(Boolean).join(", ");
   if (!i.reviewed) return `Waiting for review${decided ? ` · ${decided} so far` : ""}`;
-  return `Reviewed ${i.reviewed.by ? `by ${i.reviewed.by}` : "automatically"} · ${when(i.reviewed.at)}${decided ? ` · ${decided}` : ""}`;
+  const fixed = i.fixed ? ` · marked fixed${i.fixed.by ? ` by ${i.fixed.by}` : ""} ${when(i.fixed.at)}` : "";
+  return `Reviewed ${i.reviewed.by ? `by ${i.reviewed.by}` : "automatically"} · ${when(i.reviewed.at)}${decided ? ` · ${decided}` : ""}${fixed}`;
 }
 
 // The same report as plain text, to paste into an email or chat.

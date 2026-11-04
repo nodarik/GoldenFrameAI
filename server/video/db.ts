@@ -55,6 +55,13 @@ export const frameOf = (checkId: string) =>
   db.prepare(`SELECT f.inspection_id, f.frame_ms, i.name FROM video_frames f JOIN inspections i ON i.id = f.inspection_id
     WHERE f.check_id = ?`).get(checkId) as { inspection_id: string; frame_ms: number; name: string } | undefined;
 
+// Width / height of the video's checked frames (the shape its outlines are drawn in), if any frame was checked.
+export function frameAspect(id: string): number | undefined {
+  const f = db.prepare(`SELECT s.w, s.h FROM video_frames f JOIN checks k ON k.id = f.check_id JOIN snapshots s ON s.id = k.snapshot_id
+    WHERE f.inspection_id = ? LIMIT 1`).get(id) as { w: number; h: number } | undefined;
+  return f && f.w / f.h;
+}
+
 // A video is kept while anything still refers to it: an inspection made from one of its frames, or a scene's notice.
 export function pruneInspection(id: string) {
   const ins = getInspection(id);

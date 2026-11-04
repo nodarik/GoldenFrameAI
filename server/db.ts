@@ -125,6 +125,9 @@ addColumn("check_reviews", "result_json", "TEXT");
 // Triggers, so no route can forget it. Renaming an item doesn't change any result, so it doesn't count.
 addColumn("scenes", "setup_version", "INT NOT NULL DEFAULT 0");
 addColumn("checks", "setup_version", "INT NOT NULL DEFAULT 0");
+// When a person marked a reviewed inspection's issues fixed. Until then they keep the scene in Issues, even after a
+// newer clean inspection. Checking it again clears it (a new result).
+addColumn("checks", "fixed_at", "TEXT");
 const bumpSetup = (id: string) => `UPDATE scenes SET setup_version = setup_version + 1 WHERE id = ${id};`;
 db.exec(`
 CREATE TRIGGER IF NOT EXISTS setup_golden AFTER UPDATE OF golden_path ON scenes
@@ -178,7 +181,7 @@ export type CheckRow = {
   id: string; snapshot_id: string; status: string; score_ok: number | null; score_total: number | null;
   result_json: string; overlay_path: string | null; review: string | null; cost_usd: number; created_at: string;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
-  review_status: "needs_review" | "reviewed"; reviewed_at: string | null; setup_version: number;
+  review_status: "needs_review" | "reviewed"; reviewed_at: string | null; setup_version: number; fixed_at: string | null;
 };
 
 export type ReviewRow = { id: number; check_id: string; action: string; note: string | null; by: string | null; at: string };

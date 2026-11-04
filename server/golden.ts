@@ -267,6 +267,20 @@ export function setReview(check: CheckRow & { scene_id: string }, to: "needs_rev
   bus.emit("check", { id: check.id, sceneId: check.scene_id });
 }
 
+// Issues = confirmed findings + failed rules (what a person agreed needs fixing).
+export const issueCount = (r: Partial<CheckResult>) =>
+  (r.findings ?? []).filter((f) => f.status === "confirmed").length + (r.checklist ?? []).filter((x) => x.status === "fail").length;
+
+// Mark a reviewed inspection's issues fixed (or not fixed again), with an optional note, in its history.
+export function setFixed(check: CheckRow & { scene_id: string }, fixed: boolean, note: string | null, by: string | null) {
+  if (check.review_status !== "reviewed") throw new ReviewError("Review the inspection first.");
+  if (!issueCount(JSON.parse(check.result_json) as CheckResult)) throw new ReviewError("This inspection has no issues to fix.");
+  if (!!check.fixed_at === fixed) return;
+  db.prepare("UPDATE checks SET fixed_at = ? WHERE id = ?").run(fixed ? nowIso() : null, check.id);
+  addHistory(check.id, fixed ? "fixed" : "unfixed", note, by);
+  bus.emit("check", { id: check.id, sceneId: check.scene_id });
+}
+
 // A restart mid-check leaves it running forever; mark those as failed.
 export function failInterrupted() {
   db.prepare("UPDATE checks SET status = 'failed', result_json = ? WHERE status = 'running'")
