@@ -1,4 +1,4 @@
-app = "goldenframe"
+app = "truescene"
 # Must match the region of the gf_data volume mounted below.
 primary_region = "fra"
 

@@ -25,7 +25,7 @@ export function webhookProblem(raw: string): string | null {
 }
 
 /**
- * POST a JSON event once, signed like GitHub/Stripe webhooks: X-GoldenFrame-Signature is
+ * POST a JSON event once, signed like GitHub/Stripe webhooks: X-TrueScene-Signature is
  * "sha256=" + hex HMAC-SHA256 of the raw body with the scene's webhook secret.
  * Failures are only logged; the receiver can still fetch the result from the API.
  */
@@ -40,7 +40,7 @@ export async function deliver(raw: string, secret: string, payload: unknown) {
     const body = JSON.stringify(payload);
     const res = await fetch(url, {
       method: "POST", body, redirect: "manual", signal: AbortSignal.timeout(10_000),
-      headers: { "content-type": "application/json", "x-goldenframe-signature": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
+      headers: { "content-type": "application/json", "x-truescene-signature": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
     });
     if (!res.ok) console.warn(`Webhook to ${url.host} answered ${res.status}.`);
   } catch (e) {

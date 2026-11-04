@@ -23,7 +23,7 @@ export type Detection = { objectId: string; box: Box; confidence?: number; mask?
 
 // One SAM request: a noun phrase ("white pillow") or a point/box prompt in SAM's token grammar.
 export async function sam(ctx: RunContext, step: string, img: Img, prompt: string): Promise<Detection[]> {
-  assertBudget();
+  assertBudget(ctx);
   const started = Date.now();
   try {
     const stream = await client.responses.create({
@@ -79,7 +79,7 @@ export async function json<T>(
     system: string; content: Content[]; effort?: "low" | "medium" | "high";
   },
 ): Promise<T> {
-  assertBudget();
+  assertBudget(ctx);
   const model = opts.model ?? env.SPARK_MODEL;
   const price = model.includes("wonder") ? PRICE.wonder : PRICE.spark;
   const started = Date.now();

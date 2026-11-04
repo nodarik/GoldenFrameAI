@@ -12,6 +12,8 @@ const schema = z.object({
   API_PORT: z.coerce.number().int().default(8791),
   DATA_DIR: z.string().default("./data"),
   DAILY_SPEND_LIMIT_USD: z.coerce.number().default(10),
+  // Model spend one guest workspace ("Try TrueScene") may use in its lifetime, within the daily limit above.
+  GUEST_SPEND_LIMIT_USD: z.coerce.number().default(1),
 });
 
 const parsed = schema.safeParse(process.env);

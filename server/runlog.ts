@@ -36,10 +36,24 @@ export function spentTodayUsd(): number {
   return row.total;
 }
 
+// Everything a workspace's scenes have spent, ever. Guest workspaces live a week, so this is their whole budget.
+export function workspaceSpentUsd(ws: string): number {
+  const row = db.prepare("SELECT COALESCE(SUM(r.cost_usd), 0) AS total FROM runs r JOIN scenes s ON s.id = r.scene_id WHERE s.workspace_id = ?")
+    .get(ws) as { total: number };
+  return row.total;
+}
+
 export class SpendLimitError extends Error {}
 
-export function assertBudget() {
+export function assertBudget(ctx: RunContext) {
   if (spentTodayUsd() >= env.DAILY_SPEND_LIMIT_USD) {
     throw new SpendLimitError(`Daily model budget of $${env.DAILY_SPEND_LIMIT_USD} reached. Try again tomorrow.`);
+  }
+  // A guest workspace ("Try TrueScene") has a small budget of its own, so one visitor can't use up everyone's.
+  const ws = ctx.sceneId
+    ? (db.prepare("SELECT workspace_id FROM scenes WHERE id = ?").get(ctx.sceneId) as { workspace_id: string } | undefined)?.workspace_id
+    : undefined;
+  if (ws && ws !== "demo" && workspaceSpentUsd(ws) >= env.GUEST_SPEND_LIMIT_USD) {
+    throw new SpendLimitError(`This demo workspace has used its $${env.GUEST_SPEND_LIMIT_USD} model budget. You can still browse and review its inspections.`);
   }
 }

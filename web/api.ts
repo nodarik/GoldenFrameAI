@@ -18,9 +18,10 @@ export type LastCheck = { id: string; status: CheckStatus; reviewStatus: ReviewS
 export type SceneSummary = {
   id: string; name: string; group: string; assignee: string; createdAt: string; golden: Media | null;
   itemCount: number; ruleCount: number; toReview: number; checkCount: number; lastCheck: LastCheck | null;
+  photoCount: number; videoCount: number; photoToReview: number; videoToReview: number;
 };
 export type Scene = { id: string; name: string; group: string; assignee: string; golden: Media | null; items: Item[]; checklist: Rule[] };
-export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string };
+export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string; uploadLinkPath: string | null };
 
 export type SecondOpinion = { verdict: "real" | "not_real" | "unsure"; note: string };
 export type Finding = {
@@ -45,6 +46,7 @@ export type CheckSummary = {
   // takenAt: when the camera took the photo (EXIF), else when it was uploaded. Inspections are listed by it.
   id: string; sceneId: string; status: CheckStatus; createdAt: string; takenAt: string; costUsd: number;
   reviewStatus: ReviewStatus; reviewedAt: string | null; issues: number; flags: number; source: Source;
+  uploadedBy: string | null; // the name someone gave on an upload link (or `?by=` on the API)
   // The golden photo, watched items or checklist changed after this check ran: re-check to include the changes.
   outdated: boolean;
   score: { ok: number; total: number } | null; snapshot: Media;
@@ -81,12 +83,14 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const post = <T>(path: string, body: unknown) => api<T>(path, { method: "POST", body: JSON.stringify(body) });
 
-// POST a FormData with upload progress (fetch can't report upload progress, so XHR is used).
+// POST a FormData, or a file as the raw body (videos), with upload progress (fetch can't report upload progress, so XHR is used).
 // onProgress receives 0-100 while the request body uploads.
-export function uploadForm<T>(path: string, form: FormData, onProgress?: (pct: number) => void): Promise<T> {
+export function uploadForm<T>(path: string, form: FormData | File, onProgress?: (pct: number) => void): Promise<T> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", path);
+    // A raw file goes with its own type; a video the browser couldn't type is most likely an MP4.
+    if (form instanceof File) xhr.setRequestHeader("Content-Type", /^(video|image)\//.test(form.type) ? form.type : "video/mp4");
     xhr.onload = () => {
       try {
         const data = JSON.parse(xhr.responseText || "{}");
@@ -107,6 +111,27 @@ export function uploadForm<T>(path: string, form: FormData, onProgress?: (pct: n
   });
 }
 
+// A video inspects the given scenes: each time it shows one becomes an inspection of that scene.
+export const MAX_VIDEO_BYTES = 200 * 1024 * 1024;
+export function uploadVideo(file: File, sceneIds: string[], onProgress: (pct: number) => void): Promise<{ id: string }> {
+  if (!file.type.startsWith("video/") && !/\.(mp4|mov|m4v|webm)$/i.test(file.name)) {
+    return Promise.reject(new ApiError("Choose a video file (MP4, MOV or WebM).", 400));
+  }
+  if (file.size > MAX_VIDEO_BYTES) return Promise.reject(new ApiError("Videos must be 200 MB or smaller.", 413));
+  const name = file.name.replace(/\.[^.]+$/, "").trim().slice(0, 80) || "Video";
+  return uploadForm(`/api/video/inspections?${new URLSearchParams({ name, sceneIds: sceneIds.join(",") })}`, file, onProgress);
+}
+
+// A scene's notice about a video: still looking for the scene, or it wasn't seen / the processing failed.
+export type VideoNotice = {
+  inspectionId: string; name: string; createdAt: string; status: "pending" | "checking" | "not_seen" | "failed"; stage: string | null; note: string | null;
+};
+export type VideoScene = { sceneId: string; name: string; status: VideoNotice["status"] | "found"; note: string | null; checkIds: string[] };
+export type Video = {
+  id: string; name: string; status: "processing" | "done" | "failed"; stage: string | null; error: string | null;
+  createdAt: string; durationMs: number | null; scenes: VideoScene[];
+};
+
 // One shared connection to the server's live updates (run, check, event, inspection).
 let stream: EventSource | null = null;
 export function useStream<T>(type: string, on: (data: T) => void) {
@@ -125,11 +150,15 @@ export const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.fl
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 export function ago(iso: string) {
-  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  const d = new Date(iso);
+  const s = Math.max(0, (Date.now() - d.getTime()) / 1000);
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)} min ago`;
   if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleString(undefined, sameYear
+    ? { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }
+    : { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export const COLOURS = ["#2f7de1", "#1d9e75", "#e0662f", "#7f6ee0", "#d4537e", "#c48a16", "#5c9a1f", "#e24b4a", "#1aa3b8", "#9a5bd1"];
@@ -145,14 +174,16 @@ export const COLUMNS: { id: Column; title: string; hint: string }[] = [
   { id: "setup", title: "Not set up", hint: "Needs a golden photo and something to watch or a checklist" },
   { id: "ready", title: "Ready", hint: "Set up, no inspection yet" },
   { id: "review", title: "Needs review", hint: "An inspection waits for a person" },
-  { id: "issues", title: "Issues", hint: "Reviewed, something needs fixing or a retake" },
+  { id: "issues", title: "Issues", hint: "Reviewed, and a person confirmed something needs fixing" },
   { id: "reviewed", title: "Reviewed", hint: "Latest inspection reviewed and clean" },
 ];
 export function columnOf(s: SceneSummary): Column {
   if (!s.golden || (s.itemCount === 0 && s.ruleCount === 0)) return "setup";
   if (!s.lastCheck) return "ready";
   if (s.toReview > 0 || s.lastCheck.reviewStatus === "needs_review") return "review";
-  if (s.lastCheck.issues > 0 || s.lastCheck.status === "retake" || s.lastCheck.status === "failed") return "issues";
+  // Reviewed from here on. A retake or failed check the reviewer accepted is done; only problems they confirmed
+  // (issues found, rules failed) keep the scene in Issues.
+  if (s.lastCheck.issues > 0) return "issues";
   return "reviewed";
 }
 

@@ -1,10 +1,13 @@
 // Scenes board: one column per next step (set up, inspect, review, fix, done), plus the add/edit/delete dialogs.
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { COLUMNS, type SceneSummary, ago, api, columnOf, plural } from "./api.js";
+import { COLUMNS, type SceneSummary, type Video, ago, api, columnOf, plural, uploadVideo, useStream } from "./api.js";
 
 export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | null; group: string | null; onChange: () => void }) {
   const [editing, setEditing] = useState<SceneSummary | "new" | null>(null);
   const [deleting, setDeleting] = useState<SceneSummary | null>(null);
+  const [error, setError] = useState("");
+  const [videoId, setVideoId] = useState<string | null>(null);
+  useEffect(() => { setVideoId(null); setError(""); }, [group]);
   const shown = (scenes ?? []).filter((s) => group === null || s.group === group);
   const byColumn = new Map(COLUMNS.map((c) => [c.id, shown.filter((s) => columnOf(s) === c.id)]));
   const reviewed = byColumn.get("reviewed")!.length;
@@ -23,9 +26,12 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
           <div><b>{byColumn.get("review")!.length}</b><span>To review</span></div>
           <div><b>{reviewed}</b><span>Reviewed</span></div>
           <div><b>{shown.length}</b><span>Total</span></div>
+          {group !== null && <GroupVideoButton sceneIds={shown.filter((s) => s.golden).map((s) => s.id)} onError={setError} onStarted={setVideoId} />}
           <button className="primary" onClick={() => setEditing("new")}>+ Add scene</button>
         </div>
       </header>
+      {error && <div className="banner error" role="alert">{error} <button className="ghost" onClick={() => setError("")}>Dismiss</button></div>}
+      {videoId && <GroupVideoStatus key={videoId} id={videoId} onClose={() => setVideoId(null)} />}
 
       {scenes && scenes.length === 0 && (
         <div className="empty">
@@ -64,7 +70,15 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
   );
 }
 
-function cardNote(s: SceneSummary): { text: string; tone?: "issue" | "review" } {
+type CardLine = { text: string; tone?: "issue" | "review" };
+
+// One line per inspection kind with its own review status, e.g. "5 photo inspections · 4 to review".
+function typeLine(n: number, kind: "photo" | "video", toReview: number): CardLine {
+  const label = plural(n, `${kind} inspection`);
+  return toReview > 0 ? { text: `${label} · ${toReview} to review`, tone: "review" } : { text: `${label} · reviewed` };
+}
+
+function cardNote(s: SceneSummary): CardLine {
   if (!s.golden) return { text: "Add a golden photo" };
   if (s.itemCount === 0 && s.ruleCount === 0) return { text: "Mark what to watch" };
   const total = s.checkCount ?? 0;
@@ -75,14 +89,27 @@ function cardNote(s: SceneSummary): { text: string; tone?: "issue" | "review" } 
     if (s.toReview === total) return { text: plural(s.toReview, "inspection") + " to review", tone: "review" };
     return { text: `${plural(total, "inspection")} · ${s.toReview} to review`, tone: "review" };
   }
-  if (l.status === "retake") return { text: `${plural(total, "inspection")} · Retake photo`, tone: "issue" };
-  if (l.status === "failed") return { text: `${plural(total, "inspection")} · Check failed`, tone: "issue" };
+  // Everything is reviewed here: a retake or failed check the reviewer accepted counts as done (see columnOf).
   if (l.issues > 0) return { text: `${plural(total, "inspection")} · ${plural(l.issues, "issue")}`, tone: "issue" };
   return { text: `${plural(total, "inspection")} · All good` };
 }
 
+// Scenes with both kinds show one line per kind with its own status; otherwise a single overall line.
+function cardLines(s: SceneSummary): { lines: CardLine[]; tone?: "issue" | "review" } {
+  const photos = s.photoCount ?? 0, videos = s.videoCount ?? 0;
+  if (photos > 0 && videos > 0 && s.lastCheck && (s.checkCount ?? 0) > 0) {
+    const lines = [typeLine(photos, "photo", s.photoToReview ?? 0), typeLine(videos, "video", s.videoToReview ?? 0)];
+    const l = s.lastCheck;
+    const tone = s.toReview > 0 ? "review" as const
+      : l.issues > 0 ? "issue" as const : undefined;
+    return { lines, tone };
+  }
+  const single = cardNote(s);
+  return { lines: [single], tone: single.tone };
+}
+
 function SceneCard({ s, onEdit, onDelete }: { s: SceneSummary; onEdit: () => void; onDelete: () => void }) {
-  const note = cardNote(s);
+  const note = cardLines(s);
   return (
     <article className="scene-card">
       <a href={`#/scenes/${s.id}`} className="scene-card-link" aria-label={`Open ${s.name}`} />
@@ -97,7 +124,9 @@ function SceneCard({ s, onEdit, onDelete }: { s: SceneSummary; onEdit: () => voi
           <PersonIcon /> {s.assignee || <span className="muted">Unassigned</span>}
         </div>
         <div className={`card-foot ${note.tone ?? ""}`}>
-          <span>{note.text}</span>
+          <span className="card-counts">
+            {note.lines.map((l) => <span key={l.text} className={l.tone ?? ""}>{l.text}</span>)}
+          </span>
           {s.lastCheck && <span className="muted">{ago(s.lastCheck.createdAt)}</span>}
         </div>
         {s.group && <span className="chip">{s.group}</span>}
@@ -115,7 +144,81 @@ export function PersonIcon() {
 }
 
 // A small "⋯" menu. Closes on outside click and Escape.
-export function Menu({ label, items }: { label: string; items: { label: string; run: () => void; danger?: boolean }[] }) {
+// One video of a whole group (a floor, a site): every scene it shows gets inspections, each on its own scene page.
+function GroupVideoButton({ sceneIds, onError, onStarted }: { sceneIds: string[]; onError: (m: string) => void; onStarted: (id: string) => void }) {
+  const ref = useRef<HTMLInputElement>(null);
+  const [upload, setUpload] = useState<{ pct: number; name?: string } | null>(null);
+  const send = async (file: File | undefined) => {
+    if (!file) return;
+    onError("");
+    setUpload({ pct: 0, name: file.name });
+    try {
+      onStarted((await uploadVideo(file, sceneIds, (pct) => setUpload((u) => (u ? { ...u, pct } : u)))).id);
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setUpload(null);
+      if (ref.current) ref.current.value = "";
+    }
+  };
+  if (upload) {
+    return (
+      <span className="upload-card upload-video upload-mini" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={upload.pct}
+        aria-label={`Uploading video${upload.name ? ` ${upload.name}` : ""}`}>
+        <span className="upload-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="6" width="14" height="12" rx="2" /><path d="m16 10 6-3v10l-6-3z" /></svg>
+        </span>
+        <span className="upload-body">
+          <span className="upload-top"><b>Uploading video…</b><span className="upload-pct">{upload.pct}%</span></span>
+          <span className="upload-bar"><div style={{ width: `${upload.pct}%` }} /></span>
+        </span>
+      </span>
+    );
+  }
+  return (
+    <>
+      <input ref={ref} type="file" accept="video/*" hidden onChange={(e) => send(e.target.files?.[0])} />
+      <button onClick={() => ref.current?.click()} disabled={!sceneIds.length}
+        title={sceneIds.length ? `Film the ${plural(sceneIds.length, "scene")} of this group in one video (up to 3 min)` : "Add a golden photo to a scene first"}>
+        + Video inspection
+      </button>
+    </>
+  );
+}
+
+// Follows a group video until every scene is found or not; each scene's results are on its own page.
+function GroupVideoStatus({ id, onClose }: { id: string; onClose: () => void }) {
+  const [v, setV] = useState<Video | null>(null);
+  const load = () => api<Video>(`/api/video/inspections/${id}`).then(setV).catch(() => {});
+  useEffect(() => void load(), [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useStream<{ id: string }>("inspection", (e) => e.id === id && void load());
+  if (!v) return null;
+  const found = v.scenes.filter((s) => s.status === "found");
+  const missed = v.scenes.filter((s) => s.status === "not_seen" || s.status === "failed");
+  return (
+    <div className={`banner ${v.status === "failed" ? "error" : "info"}`} role="status">
+      {v.status === "processing" && <span className="spinner" />}
+      <div>
+        <strong>{v.name}</strong>{" "}
+        {v.status === "processing" ? `${v.stage ?? "Processing"}…` : v.status === "failed" ? (v.error ?? "The video couldn't be checked.")
+          : `Found ${found.length} of ${v.scenes.length} scenes.`}
+        {(found.length > 0 || missed.length > 0) && (
+          <div className="small">
+            {found.map((s) => <a key={s.sceneId} href={`#/scenes/${s.sceneId}/i/${s.checkIds[0]}`}>{s.name} ({plural(s.checkIds.length, "inspection")})</a>)
+              .concat(missed.map((s) => <span key={s.sceneId} className="muted">{s.name}: {s.status === "failed" ? "failed" : "not seen"}</span>))
+              .flatMap((el, i) => (i ? [<span key={`sep${i}`}> · </span>, el] : [el]))}
+          </div>
+        )}
+      </div>
+      {v.status !== "processing" && <button className="ghost" onClick={onClose}>Dismiss</button>}
+    </div>
+  );
+}
+
+// A dropdown of actions. Without `text` the trigger is a "⋯" icon button labelled `label`.
+export function Menu({ label, items, text, className }: {
+  label: string; items: { label: string; run: () => void; danger?: boolean }[]; text?: string; className?: string;
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -129,7 +232,9 @@ export function Menu({ label, items }: { label: string; items: { label: string; 
   }, [open]);
   return (
     <div className="menu" ref={ref}>
-      <button className="icon" aria-label={label} aria-expanded={open} onClick={() => setOpen(!open)}>⋯</button>
+      {text
+        ? <button className={className} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>{text} ▾</button>
+        : <button className="icon" aria-label={label} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)}>⋯</button>}
       {open && (
         <div className="menu-list" role="menu">
           {items.map((i) => (
@@ -142,11 +247,11 @@ export function Menu({ label, items }: { label: string; items: { label: string; 
 }
 
 // A native modal dialog, open while mounted.
-export function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+export function Dialog({ title, onClose, children, wide }: { title: string; onClose: () => void; children: React.ReactNode; wide?: boolean }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => { ref.current?.showModal(); }, []);
   return (
-    <dialog ref={ref} className="dialog" onClose={onClose} onClick={(e) => e.target === ref.current && onClose()} aria-label={title}>
+    <dialog ref={ref} className={wide ? "dialog wide" : "dialog"} onClose={onClose} onClick={(e) => e.target === ref.current && onClose()} aria-label={title}>
       <h2>{title}</h2>
       {children}
     </dialog>
