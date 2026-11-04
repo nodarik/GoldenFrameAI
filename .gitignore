@@ -16,3 +16,7 @@ spike/*.heic
 spike/out/
 
 .DS_Store
+
+# demo source media and private notes
+Media/
+docs/demo-video-script.md
