@@ -143,7 +143,7 @@ You need Node 22.5+, `ffmpeg` on your PATH (`brew install ffmpeg`), and a Meta m
 git clone https://github.com/nodarik/TrueScene.git
 cd TrueScene
 npm install
-cp .env.example .env   # then set MODEL_API_KEY
+echo "MODEL_API_KEY=your-meta-api-key" > .env   # other settings: see Configuration below
 npm run dev
 ```
 
