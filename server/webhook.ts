@@ -27,23 +27,29 @@ export function webhookProblem(raw: string): string | null {
 /**
  * POST a JSON event once, signed like GitHub/Stripe webhooks: X-TrueScene-Signature is
  * "sha256=" + hex HMAC-SHA256 of the raw body with the scene's webhook secret.
- * Failures are only logged; the receiver can still fetch the result from the API.
+ * Failures are only logged (the receiver can still fetch the result from the API) and returned for callers that show them.
  */
-export async function deliver(raw: string, secret: string, payload: unknown) {
+export async function deliver(raw: string, secret: string, payload: unknown): Promise<string | null> {
   try {
     const url = new URL(raw);
     if (!local()) {
       const addrs = await lookup(url.hostname.replace(/^\[|\]$/g, ""), { all: true });
-      if (addrs.some((a) => internal.check(a.address, a.family === 6 ? "ipv6" : "ipv4")))
-        return console.warn(`Webhook skipped: ${url.host} resolves to a private address.`);
+      if (addrs.some((a) => internal.check(a.address, a.family === 6 ? "ipv6" : "ipv4"))) {
+        console.warn(`Webhook skipped: ${url.host} resolves to a private address.`);
+        return `${url.host} resolves to a private address.`;
+      }
     }
     const body = JSON.stringify(payload);
     const res = await fetch(url, {
       method: "POST", body, redirect: "manual", signal: AbortSignal.timeout(10_000),
       headers: { "content-type": "application/json", "x-truescene-signature": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
     });
-    if (!res.ok) console.warn(`Webhook to ${url.host} answered ${res.status}.`);
+    if (res.ok) return null;
+    console.warn(`Webhook to ${url.host} answered ${res.status}.`);
+    return `${url.host} answered ${res.status}.`;
   } catch (e) {
-    console.warn(`Webhook to ${raw} failed: ${e instanceof Error ? e.message : String(e)}`);
+    const why = e instanceof Error ? e.message : String(e);
+    console.warn(`Webhook to ${raw} failed: ${why}`);
+    return `The webhook couldn't be reached: ${why}`;
   }
 }

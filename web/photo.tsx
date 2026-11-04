@@ -3,6 +3,7 @@
 // With `editable` and `onBoxChange`, that shape's boxes can be dragged and resized by their corners (or nudged with
 // the arrow keys, Shift to resize); the change is handed over when the drag ends. With `onBoxDelete`, each box of a
 // shape with several has a delete button (or Delete key), for "watch two of these three pillows".
+// `surface` draws something else under the outlines in place of the photo, such as the video the photo is a frame of.
 import { type ReactNode, useId, useRef, useState } from "react";
 import type { Mask, Media, UnitBox } from "./api.js";
 
@@ -36,13 +37,14 @@ function reshape(b: UnitBox, handle: Handle, dx: number, dy: number): UnitBox {
   return next;
 }
 
-export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmptyClick, label, frame, busyAt, caption, editable, onBoxChange, onBoxDelete }: {
+export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmptyClick, label, frame, busyAt, caption, editable, onBoxChange, onBoxDelete, surface }: {
   media: Media; shapes: Shape[]; active?: string | null; onActive?: (id: string | null) => void;
   onPick?: (id: string) => void; onEmptyClick?: (fx: number, fy: number) => void; label: string;
-  // Where the golden photo's edges fall on this photo (framing check), drawn as a dashed frame.
+  // Where the initial photo's edges fall on this photo (framing check), drawn as a dashed frame.
   frame?: UnitBox | null; busyAt?: { x: number; y: number } | null; caption?: ReactNode;
   editable?: string | null; onBoxChange?: (id: string, boxes: UnitBox[]) => Promise<void>;
   onBoxDelete?: (id: string, index: number) => void;
+  surface?: ReactNode;
 }) {
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null);
   // The box being changed, shown in place of the saved one until the change is saved.
@@ -134,7 +136,7 @@ export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmpt
           onEmptyClick((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
         }}
       >
-        <img src={media.url} alt={label} draggable={false} onError={() => setMissing(true)} />
+        {surface ?? <img src={media.url} alt={label} draggable={false} onError={() => setMissing(true)} />}
         <svg viewBox={`0 0 ${media.w} ${media.h}`} preserveAspectRatio="none" aria-hidden="true">
           <defs>
             <mask id={maskId}>
@@ -185,6 +187,16 @@ export function AnnotatedPhoto({ media, shapes, active, onActive, onPick, onEmpt
             );
           })}
         </svg>
+        {/* A name chip on each box's top corner (the one nearer the photo's middle, so it stays on the photo),
+            in HTML so it stays readable at any photo size.
+            The box being edited has none: its corner handle sits there. */}
+        {shapes.filter((s) => s !== edited).flatMap((s) => s.boxes.map((b, i) => (
+          <span key={`${s.id}:${i}`} aria-hidden="true"
+            className={`box-label${s.id === current ? " is-lit" : current ? " is-dim" : ""}`}
+            style={{ [b.left + b.right > 1 ? "right" : "left"]: `${(b.left + b.right > 1 ? 1 - b.right : b.left) * 100}%`, top: `${b.top * 100}%`, "--c": s.colour ?? TONE[s.tone ?? "muted"] } as React.CSSProperties}>
+            {s.label}
+          </span>
+        )))}
         {busyAt && <div className="pending-dot" style={{ left: `${busyAt.x * 100}%`, top: `${busyAt.y * 100}%` }} />}
         {hover && lit && (
           <div className="tag" style={{ left: hover.x, top: hover.y, "--c": lit.colour ?? TONE[lit.tone ?? "muted"] } as React.CSSProperties} role="tooltip">

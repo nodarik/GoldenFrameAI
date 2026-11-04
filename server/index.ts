@@ -8,12 +8,12 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import { DEFAULT_SECTION, MAX_RULES, type Rule, getChecklist, setChecklist } from "./checklist.js";
-import { type CheckRow, type ItemRow, type ReviewRow, type SceneRow, type SnapshotRow, db, getScene, listItems, saveMedia } from "./db.js";
+import { type CheckRow, DIGEST_EVERY, type DigestEvery, type ItemRow, type ReviewRow, type SceneRow, type SnapshotRow, db, getScene, listItems, saveMedia } from "./db.js";
 import { env } from "./env.js";
 import { newId, newSecret, nowIso } from "./ids.js";
 import { type CheckResult, ReviewError, decide, failInterrupted, openFlags, runCheck, setReview } from "./golden.js";
 import { type Box, type Img, load, normalise, takenAt } from "./images.js";
-import { DRAFT_CHECKLIST, errorText, imagePart, json } from "./meta.js";
+import { DRAFT_CHECKLIST, SCENE_REPORT, errorText, imagePart, json } from "./meta.js";
 import { SpendLimitError, bus, spentTodayUsd, workspaceSpentUsd } from "./runlog.js";
 import { TapError, detectItems, recount, tapToItem } from "./setup.js";
 import { frameOf, getInspection, newVideoId, pruneInspection } from "./video/db.js";
@@ -226,10 +226,10 @@ app.post("/api/scenes/:id/golden", async (c) => {
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const img = await readPhoto(await c.req.parseBody());
   if ("error" in img) return c.json({ error: img.error }, img.status);
-  // A new file per upload: earlier checks keep pointing at the golden photo they were compared with.
+  // A new file per upload: earlier checks keep pointing at the initial photo they were compared with.
   const rel = `scenes/${scene.id}/golden-${Date.now()}.jpg`;
   saveMedia(rel, img.buf);
-  // A new golden photo invalidates the items tapped on the old one.
+  // A new initial photo invalidates the items tapped on the old one.
   db.prepare("DELETE FROM items WHERE scene_id = ?").run(scene.id);
   db.prepare("UPDATE scenes SET golden_path = ?, golden_w = ?, golden_h = ? WHERE id = ?").run(rel, img.w, img.h, scene.id);
   return c.json(sceneJson(getScene(scene.id)!));
@@ -248,7 +248,7 @@ app.post("/api/scenes/:id/items/tap", async (c) => {
   const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
-  if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
+  if (!golden) return c.json({ error: "Upload the initial photo first." }, 400);
   const body = z
     .object({ x: z.number().min(0).max(golden.w), y: z.number().min(0).max(golden.h) })
     .safeParse(await c.req.json().catch(() => null));
@@ -266,7 +266,7 @@ app.post("/api/scenes/:id/items/detect", async (c) => {
   const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
-  if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
+  if (!golden) return c.json({ error: "Upload the initial photo first." }, 400);
   try {
     return c.json((await detectItems(scene, golden)).map(itemJson), 201);
   } catch (e) {
@@ -275,7 +275,7 @@ app.post("/api/scenes/:id/items/detect", async (c) => {
   }
 });
 
-// A box a person drew or corrected on the golden photo, in 0–1 units of the photo.
+// A box a person drew or corrected on the initial photo, in 0–1 units of the photo.
 const UnitBox = z.object({ left: z.number(), top: z.number(), right: z.number(), bottom: z.number() })
   .refine((b) => b.left >= 0 && b.top >= 0 && b.right <= 1 && b.bottom <= 1 && b.right - b.left >= 0.01 && b.bottom - b.top >= 0.01);
 
@@ -382,12 +382,12 @@ app.put("/api/scenes/:id/checklist", async (c) => {
 
 const Draft = z.object({ sections: z.array(z.object({ name: z.string().max(60), rules: z.array(z.string().max(200)).max(10) })).max(8) });
 
-// Muse Wonder drafts sections of rules from the golden photo; they're added after the existing rules.
+// Muse Wonder drafts sections of rules from the initial photo; they're added after the existing rules.
 app.post("/api/scenes/:id/checklist/draft", async (c) => {
   const scene = ownScene(c, c.req.param("id"));
   if (!scene) return c.json({ error: "Scene not found." }, 404);
   const golden = await goldenOf(scene);
-  if (!golden) return c.json({ error: "Upload the golden photo first." }, 400);
+  if (!golden) return c.json({ error: "Upload the initial photo first." }, 400);
   const items = listItems(scene.id);
   const existing = getChecklist(scene.id);
   // Drafting again adds to the checklist: Wonder sees what's there so it neither repeats it nor renames its sections.
@@ -417,7 +417,7 @@ app.post("/api/scenes/:id/checklist/draft", async (c) => {
   }
 });
 
-// ---------- checks: compare a new photo with the golden one ----------
+// ---------- checks: compare a new photo with the initial one ----------
 type CheckJoined = CheckRow & {
   scene_id: string; snapshot_path: string; snapshot_w: number; snapshot_h: number; captured_at: string; scene_setup_version: number;
   uploaded_by: string | null;
@@ -443,7 +443,7 @@ const checkJson = (c: CheckJoined, full: boolean) => {
   return {
     id: c.id, sceneId: c.scene_id, status: c.status, createdAt: c.created_at, takenAt: c.captured_at, costUsd: c.cost_usd,
     reviewStatus: c.review_status, reviewedAt: c.reviewed_at, ...tallyOf(result), source: sourceOf(c.id), uploadedBy: c.uploaded_by,
-    // The golden photo, watched items or checklist changed after this check ran.
+    // The initial photo, watched items or checklist changed after this check ran.
     outdated: c.status !== "running" && c.setup_version < c.scene_setup_version,
     score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
     findingCount: (result.findings ?? []).filter((f: { status: string }) => f.status !== "rejected").length,
@@ -459,7 +459,7 @@ const checkJson = (c: CheckJoined, full: boolean) => {
 type Photo = Img & { takenAt: string | null };
 async function startCheck(scene: SceneRow, photo: Photo | { error: string; status: 400 | 413 }, source: "upload" | "ingest", by: string | null = null) {
   const golden = await goldenOf(scene);
-  if (!golden) return { error: "Upload the golden photo first.", status: 400 as const };
+  if (!golden) return { error: "Upload the initial photo first.", status: 400 as const };
   if ("error" in photo) return photo;
   const img = photo;
 
@@ -477,12 +477,12 @@ async function startCheck(scene: SceneRow, photo: Photo | { error: string; statu
   return { checkId, snapshotId, takenAt: captured };
 }
 
-// Check a finished inspection again on the same photo, against the scene's current golden photo, items and checklist.
+// Check a finished inspection again on the same photo, against the scene's current initial photo, items and checklist.
 // The previous result stays with the history entry, and the inspection waits for review again.
 async function recheck(check: CheckJoined, by: string | null) {
   const scene = getScene(check.scene_id)!;
   const golden = await goldenOf(scene);
-  if (!golden) return { error: "Upload the golden photo first.", status: 400 as const };
+  if (!golden) return { error: "Upload the initial photo first.", status: 400 as const };
   let snap: Img;
   try {
     snap = await load(readFileSync(resolve(env.DATA_DIR, check.snapshot_path)));
@@ -495,7 +495,7 @@ async function recheck(check: CheckJoined, by: string | null) {
     WHERE id = ? AND status != 'running'`).run(scene.golden_path, golden.w, golden.h, scene.setup_version, check.id);
   if (!claimed.changes) return { error: "It's already being checked.", status: 409 as const };
   db.prepare("INSERT INTO check_reviews (check_id, action, note, by, at, result_json) VALUES (?, 'rechecked', ?, ?, ?, ?)")
-    .run(check.id, "Checked again with the current golden photo, items and checklist.", by, nowIso(), check.result_json);
+    .run(check.id, "Checked again with the current initial photo, items and checklist.", by, nowIso(), check.result_json);
   db.prepare("UPDATE snapshots SET status = 'checking' WHERE id = ?").run(check.snapshot_id);
   bus.emit("check", { id: check.id, sceneId: scene.id, status: "running" });
   void runCheck(scene, check.id, golden, snap);
@@ -598,10 +598,193 @@ app.post("/api/checks/:id/review", async (c) => {
   return c.json(checkJson(getCheck(check.id)!, true));
 });
 
+// ---------- report: one scene's whole history in plain language ----------
+// Built from what is stored, with no model call: when each initial photo was set, then every inspection oldest first
+// with its Muse Wonder summary, the problems a person confirmed, what is still to decide, and the review trail.
+// The overview on top is Muse Wonder's, written on request and kept on the scene until it is written again.
+type ReportOverview = { overview: string; at: string; inspections: number; lastAt: string | null };
+const Overview = z.object({ overview: z.string().max(1500) });
+const DECIDED = { confirmed: ["finding_confirmed", "rule_confirmed"], dismissed: ["finding_rejected", "rule_rejected"] };
+
+// Initial photos are saved as golden-<ms>.jpg (older rows: golden.jpg#<ms>), so the file name says when it was set.
+const goldenSetAt = (path: string, fallback: string) => {
+  const m = path.match(/golden-(\d{12,})\.jpg|#(\d{12,})$/);
+  const ms = Number(m?.[1] ?? m?.[2]);
+  return ms ? new Date(ms).toISOString() : fallback;
+};
+
+function reportOf(scene: SceneRow) {
+  const checks = db.prepare(`${CHECK_SELECT} WHERE s.scene_id = ? ORDER BY s.captured_at ASC, c.created_at ASC LIMIT 200`)
+    .all(scene.id) as CheckJoined[];
+  const reviews = db.prepare(`SELECT r.id, r.check_id, r.action, r.note, r.by, r.at FROM check_reviews r JOIN checks c ON c.id = r.check_id
+    JOIN snapshots s ON s.id = c.snapshot_id WHERE s.scene_id = ? ORDER BY r.id`).all(scene.id) as ReviewRow[];
+
+  // Each initial photo the scene has had, in the order it was set: the ones old inspections used, then the current one.
+  // Inspections are dated by when the photo was taken, which can be before the initial photo was uploaded;
+  // an initial photo then counts from its first inspection, so the timeline never compares against a future photo.
+  const paths = [...new Set([...checks.map((c) => c.golden_path), scene.golden_path].filter((p): p is string => !!p))];
+  const initialPhotos = paths
+    .map((p) => {
+      const set = goldenSetAt(p, scene.created_at);
+      const first = checks.find((c) => c.golden_path === p)?.captured_at;
+      return { at: first && first < set ? first : set, current: p === scene.golden_path };
+    })
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .map((g, i) => ({ ...g, replaced: i > 0 }));
+
+  const inspections = checks.map((c) => {
+    const result = JSON.parse(c.result_json) as Partial<CheckResult>;
+    const findings = (result.findings ?? []).filter((f) => !f.outsideFrame);
+    const rules = result.checklist ?? [];
+    const trail = reviews.filter((r) => r.check_id === c.id);
+    const lastReview = trail.filter((r) => r.action === "reviewed" || r.action === "auto_reviewed").at(-1);
+    return {
+      id: c.id, at: c.captured_at, status: c.status, reviewStatus: c.review_status, source: sourceOf(c.id), uploadedBy: c.uploaded_by,
+      score: c.score_total === null ? null : { ok: c.score_ok, total: c.score_total },
+      summary: result.summary ?? null, error: result.error ?? null,
+      problems: [...findings.filter((f) => f.status === "confirmed").map((f) => f.text), ...rules.filter((r) => r.status === "fail").map((r) => `Not met: ${r.text}`)],
+      toDecide: [...findings.filter((f) => f.status === "needs_review").map((f) => f.text), ...rules.filter((r) => r.status === "needs_review").map((r) => r.text)],
+      confirmed: trail.filter((r) => DECIDED.confirmed.includes(r.action)).length,
+      dismissed: trail.filter((r) => DECIDED.dismissed.includes(r.action)).length,
+      reviewed: c.review_status === "reviewed" && lastReview ? { by: lastReview.action === "auto_reviewed" ? null : lastReview.by, at: lastReview.at } : null,
+      notes: trail.filter((r) => r.note).map((r) => ({ note: r.note!, by: r.by, at: r.at })),
+    };
+  });
+
+  const done = inspections.filter((i) => i.status !== "running");
+  const lastAt = done.at(-1)?.at ?? null;
+  const saved = scene.report_json ? (JSON.parse(scene.report_json) as ReportOverview) : null;
+  return {
+    initialPhotos,
+    items: listItems(scene.id).length, rules: getChecklist(scene.id).length,
+    inspections,
+    // Stale once an inspection was added, removed or re-run since Wonder wrote it.
+    overview: saved ? { ...saved, stale: saved.inspections !== done.length || saved.lastAt !== lastAt } : null,
+  };
+}
+
+app.get("/api/scenes/:id/report", (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  return c.json(reportOf(scene));
+});
+
+// Muse Wonder writes the overview from the stored report and keeps it on the scene. Throws when the model call fails.
+async function writeOverview(scene: SceneRow, report: ReturnType<typeof reportOf>) {
+  const done = report.inspections.filter((i) => i.status !== "running");
+  const day = (iso: string) => iso.slice(0, 16).replace("T", " ");
+  // The newest 60 inspections keep the request small; the count still covers them all.
+  const input = {
+    scene: { name: scene.name, group: scene.group_name, inspectionCount: done.length },
+    initialPhotos: report.initialPhotos.map((g) => ({ date: day(g.at), event: g.replaced ? "initial photo replaced" : "initial photo set" })),
+    inspections: done.slice(-60).map((i) => ({
+      date: day(i.at), source: i.source.type === "video" ? `video "${i.source.inspectionName}"` : "photo",
+      result: i.error ? `check failed: ${i.error}` : i.status, points: i.score ? `${i.score.ok} of ${i.score.total}` : null,
+      summary: i.summary, problems: i.problems, toDecide: i.toDecide,
+      review: i.reviewStatus === "reviewed" ? `reviewed${i.reviewed?.by ? ` by ${i.reviewed.by}` : ""}` : "waiting for review",
+      notes: i.notes.map((n) => n.note),
+    })),
+  };
+  const out = await json({ sceneId: scene.id }, {
+    step: "scene.report", model: env.WONDER_MODEL, name: SCENE_REPORT.name, jsonSchema: SCENE_REPORT.jsonSchema, schema: Overview,
+    system: SCENE_REPORT.system, content: [{ type: "text", text: JSON.stringify(input) }], effort: "low",
+  });
+  const saved: ReportOverview = { overview: out.overview.trim(), at: nowIso(), inspections: done.length, lastAt: done.at(-1)?.at ?? null };
+  db.prepare("UPDATE scenes SET report_json = ? WHERE id = ?").run(JSON.stringify(saved), scene.id);
+}
+
+app.post("/api/scenes/:id/report/overview", async (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const report = reportOf(scene);
+  if (!report.inspections.some((i) => i.status !== "running")) return c.json({ error: "There are no finished inspections to summarise yet." }, 400);
+  try {
+    await writeOverview(scene, report);
+    return c.json(reportOf(getScene(scene.id)!));
+  } catch (e) {
+    const f = failure(e);
+    return c.json({ error: f.error }, f.status);
+  }
+});
+
+// ---------- report summary: the Muse Wonder overview, posted to the scene's webhook as report.summary ----------
+// Daily, weekly (Mondays) or monthly (the 1st) at the scene's chosen UTC hour, and only when there are inspections
+// the last summary didn't cover.
+// The overview is written again first when it is stale, so the summary always matches the report.
+type DigestSent = { sentAt: string; inspections: number; lastAt: string | null };
+const lastDigest = (s: SceneRow) => (s.digest_json ? (JSON.parse(s.digest_json) as DigestSent) : null);
+const digestSending = new Set<string>();
+
+class DigestError extends Error {}
+
+async function sendDigest(sceneId: string) {
+  if (digestSending.has(sceneId)) throw new DigestError("A summary for this scene is being sent right now.");
+  digestSending.add(sceneId);
+  try {
+    let scene = getScene(sceneId);
+    if (!scene?.webhook_url) throw new DigestError("Save a webhook URL first; the summary is posted there.");
+    let report = reportOf(scene);
+    const done = report.inspections.filter((i) => i.status !== "running");
+    if (!done.length) throw new DigestError("There are no finished inspections to summarise yet.");
+    if (!report.overview || report.overview.stale) {
+      await writeOverview(scene, report);
+      scene = getScene(sceneId)!;
+      report = reportOf(scene);
+    }
+    const prev = lastDigest(scene);
+    const fresh = prev ? done.filter((i) => !prev.lastAt || i.at > prev.lastAt) : done;
+    const waiting = done.filter((i) => i.reviewStatus === "needs_review").length;
+    const problems = done.reduce((n, i) => n + i.problems.length, 0);
+    const counts = { total: done.length, new: fresh.length, waitingForReview: waiting, problems };
+    const text = [
+      `Report: ${scene.name}${scene.group_name ? ` (${scene.group_name})` : ""}`, "",
+      report.overview!.overview, "",
+      `${counts.new} new of ${counts.total} inspections · ${waiting} waiting for review · ${problems} problems found`,
+    ].join("\n");
+    const problem = await deliver(scene.webhook_url!, scene.webhook_secret, {
+      event: "report.summary",
+      scene: { id: scene.id, name: scene.name, group: scene.group_name },
+      overview: report.overview!.overview, overviewAt: report.overview!.at, since: prev?.sentAt ?? null,
+      inspections: counts,
+      newInspections: fresh.map((i) => ({ id: i.id, at: i.at, status: i.status, reviewStatus: i.reviewStatus, score: i.score, summary: i.summary, problems: i.problems, toDecide: i.toDecide })),
+      text,
+    });
+    if (problem) throw new DigestError(problem);
+    const sent: DigestSent = { sentAt: nowIso(), inspections: done.length, lastAt: done.at(-1)!.at };
+    db.prepare("UPDATE scenes SET digest_json = ? WHERE id = ?").run(JSON.stringify(sent), sceneId);
+  } finally {
+    digestSending.delete(sceneId);
+  }
+}
+
+// Checked every 5 minutes; a scene is due in its hour on its day (UTC) if it has a webhook, wasn't sent that day and
+// has new inspections.
+const dueToday: Record<DigestEvery, (now: Date) => boolean> = {
+  day: () => true, week: (now) => now.getUTCDay() === 1, month: (now) => now.getUTCDate() === 1,
+};
+
+async function sendDueDigests() {
+  const now = new Date(), today = now.toISOString().slice(0, 10);
+  const due = db.prepare("SELECT * FROM scenes WHERE digest_hour = ? AND webhook_url IS NOT NULL").all(now.getUTCHours()) as SceneRow[];
+  for (const scene of due) {
+    if (!dueToday[scene.digest_every](now)) continue;
+    const prev = lastDigest(scene);
+    if (prev?.sentAt.startsWith(today)) continue;
+    const done = reportOf(scene).inspections.filter((i) => i.status !== "running");
+    if (!done.length || (prev && prev.inspections === done.length && prev.lastAt === done.at(-1)!.at)) continue;
+    try {
+      await sendDigest(scene.id);
+    } catch (e) {
+      console.warn(`Report summary for scene ${scene.id} not sent: ${errorText(e)}`);
+    }
+  }
+}
+
 // ---------- integrations: third parties send photos with a scene's ingest token and get results by webhook ----------
 const integrationJson = (s: SceneRow) => ({
   ingestPath: `/api/ingest/${s.id}`, token: s.ingest_token, webhookUrl: s.webhook_url ?? "", webhookSecret: s.webhook_secret,
   uploadLinkPath: s.upload_link_token ? `/u/${s.upload_link_token}` : null,
+  digestHour: s.digest_hour, digestEvery: s.digest_every, digestSentAt: lastDigest(s)?.sentAt ?? null,
 });
 
 app.get("/api/scenes/:id/integration", (c) => {
@@ -618,6 +801,32 @@ app.put("/api/scenes/:id/integration", async (c) => {
   if (problem) return c.json({ error: problem }, 400);
   db.prepare("UPDATE scenes SET webhook_url = ? WHERE id = ?").run(body.data.webhookUrl || null, scene.id);
   return c.json(integrationJson(getScene(scene.id)!));
+});
+
+// The report summary: how often (day, week, month) and the UTC hour (0-23) it goes out; hour null turns it off.
+app.put("/api/scenes/:id/integration/digest", async (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  const body = z.object({ hour: z.number().int().min(0).max(23).nullable(), every: z.enum(DIGEST_EVERY).optional() })
+    .safeParse(await c.req.json().catch(() => null));
+  if (!body.success) return c.json({ error: "Send an hour from 0 to 23 (UTC) or null to turn the summary off, and every: day, week or month." }, 400);
+  if (body.data.hour !== null && !scene.webhook_url) return c.json({ error: "Save a webhook URL first; the summary is posted there." }, 400);
+  db.prepare("UPDATE scenes SET digest_hour = ?, digest_every = ? WHERE id = ?").run(body.data.hour, body.data.every ?? scene.digest_every, scene.id);
+  return c.json(integrationJson(getScene(scene.id)!));
+});
+
+// Send the summary now, to try the webhook; on a scheduled day it counts as that day's summary.
+app.post("/api/scenes/:id/integration/digest/send", async (c) => {
+  const scene = ownScene(c, c.req.param("id"));
+  if (!scene) return c.json({ error: "Scene not found." }, 404);
+  try {
+    await sendDigest(scene.id);
+    return c.json(integrationJson(getScene(scene.id)!));
+  } catch (e) {
+    if (e instanceof DigestError) return c.json({ error: e.message }, 400);
+    const f = failure(e);
+    return c.json({ error: f.error }, f.status);
+  }
 });
 
 // New token and secret; the old ones stop working at once.
@@ -681,7 +890,7 @@ app.post("/api/ingest/:sceneId", async (c) => {
 });
 
 // ---------- upload links: a public page (/u/<token>) where people send photos and videos to one scene ----------
-// They see the scene's name and golden photo, and only learn that a file arrived: results stay with the reviewers.
+// They see the scene's name and initial photo, and only learn that a file arrived: results stay with the reviewers.
 const linkScene = (token: string) =>
   db.prepare("SELECT * FROM scenes WHERE upload_link_token = ?").get(token) as SceneRow | undefined;
 const LINK_OFF = { error: "This upload link isn't active any more. Ask for a new one." };
@@ -792,7 +1001,7 @@ app.get("/media/scenes/:id/golden.jpg", (c) => {
   return c.body(readFileSync(file), 200, { "Content-Type": "image/jpeg", "Cache-Control": "private, max-age=3600" });
 });
 
-// The golden photo a check was compared with, which may no longer be the scene's current one.
+// The initial photo a check was compared with, which may no longer be the scene's current one.
 app.get("/media/checks/:id/golden.jpg", (c) => {
   const check = ownCheck(c, c.req.param("id"));
   const file = check?.golden_path ? goldenFile(check.golden_path) : null;
@@ -821,4 +1030,5 @@ if (existsSync("dist/web")) {
 failInterrupted();
 expireGuests();
 setInterval(expireGuests, 3600_000).unref();
+setInterval(() => void sendDueDigests(), 5 * 60_000).unref();
 serve({ fetch: app.fetch, port: env.API_PORT, hostname: "0.0.0.0" }, (info) => console.log(`TrueScene API on http://localhost:${info.port}`));

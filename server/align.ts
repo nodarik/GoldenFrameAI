@@ -1,13 +1,13 @@
-// Framing check: is the new photo taken like the golden one? Watched items found by SAM in both photos act as
+// Framing check: is the new photo taken like the initial one? Watched items found by SAM in both photos act as
 // anchors: their boxes give the zoom and shift between the two photos. Without enough anchors, Spark's framing
 // judgement is used. Everything is in 0-1 fractions of each photo.
 import { type Box, area } from "./images.js";
 
 export type AlignLevel = "aligned" | "slightly_off" | "far_off";
 export type Alignment = {
-  // 0-100: share of the golden photo's view the new photo shows, less a penalty for zoom. Null without enough anchors.
+  // 0-100: share of the initial photo's view the new photo shows, less a penalty for zoom. Null without enough anchors.
   score: number | null; level: AlignLevel; hint: string; source: "sam" | "spark"; anchors: number;
-  // Where the golden photo's edges fall on the new photo (may extend past 0-1). Null without anchors.
+  // Where the initial photo's edges fall on the new photo (may extend past 0-1). Null without anchors.
   frame: Box | null;
 };
 
@@ -17,9 +17,9 @@ type Transform = { scale: number; dx: number; dy: number };
 const MIN_ANCHORS = 2;
 const ALIGNED = 0.8;
 const SLIGHTLY_OFF = 0.55;
-// Without a measured frame, a box this close to an edge of a misframed photo may be outside the golden view.
+// Without a measured frame, a box this close to an edge of a misframed photo may be outside the initial photo's view.
 const EDGE = 0.03;
-// A finding counts as outside the golden view when at least this share of its box is.
+// A finding counts as outside the initial photo's view when at least this share of its box is.
 const OUTSIDE_SHARE = 0.5;
 
 const median = (xs: number[]) => {
@@ -55,7 +55,7 @@ function hintFrom(t: Transform, frame: Box): string {
   else if (offY < -0.05) parts.push("tilt a little up");
   if (!parts.length) return "";
   const text = parts.join(", ");
-  return `${text[0].toUpperCase()}${text.slice(1)} to match the golden photo.`;
+  return `${text[0].toUpperCase()}${text.slice(1)} to match the initial photo.`;
 }
 
 export function align(
@@ -76,7 +76,7 @@ export function align(
   };
 }
 
-// Maps a box on the new photo into the golden photo's coordinates, so "moved" ignores a camera shift.
+// Maps a box on the new photo into the initial photo's coordinates, so "moved" ignores a camera shift.
 export function toGolden(a: Alignment): (b: Box) => Box {
   const f = a.frame;
   if (!f) return (b) => b;
@@ -84,7 +84,7 @@ export function toGolden(a: Alignment): (b: Box) => Box {
   return (b) => ({ left: (b.left - f.left) / s, top: (b.top - f.top) / s, right: (b.right - f.left) / s, bottom: (b.bottom - f.top) / s });
 }
 
-// True when a box on the new photo shows something the golden photo never covered.
+// True when a box on the new photo shows something the initial photo never covered.
 export function outsideGolden(a: Alignment): (b: Box) => boolean {
   const f = a.frame;
   if (f) return (b) => area(b) > 0 && 1 - area(intersect(b, f)) / area(b) >= OUTSIDE_SHARE;

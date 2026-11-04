@@ -41,10 +41,10 @@ Models do the looking, and **a person makes every final call**.
 | ![Kanban board of scenes](docs/screenshots/board.png) | ![Scene with initial photo and checklist](docs/screenshots/scene.png) | ![Inspection: initial vs new photo with findings](docs/screenshots/inspection.png) |
 | Every scene, sorted by what a person has to do next | The initial photo, watched objects and the checklist | The initial and new photos side by side, with findings to confirm or dismiss |
 
-| Video inspection | Upload link & automation |
-|---|---|
-| ![Video inspection with frame picked from a walk-through](docs/screenshots/video.png) | ![QR upload link and webhook settings](docs/screenshots/automation.png) |
-| One walk-through video becomes an inspection for every scene it shows | Print a QR code for staff, or send photos from any camera or workflow tool |
+| Video inspection | Outlines on the playing video | Upload link & automation |
+|---|---|---|
+| ![Video inspection with frame picked from a walk-through](docs/screenshots/video.png) | ![Findings and labels following their objects on a playing walk-through video](docs/screenshots/video-tracking.png) | ![QR upload link and webhook settings](docs/screenshots/automation.png) |
+| One walk-through video becomes an inspection for every scene it shows | Findings and labels stay on their objects while the video plays | Print a QR code for staff, or send photos from any camera or workflow tool |
 
 ## How it works
 
@@ -72,9 +72,9 @@ flowchart LR
 |---|---|
 | **SAM 3.1** | Outlining and counting every watched object, in the initial photo and in every inspection |
 | **Muse Spark** (`muse-spark-1.3`) | Listing objects, checking it's the same view, finding differences, checking checklist rules, picking video frames |
-| **Muse Wonder** (`muse-wonder-1.0`) | Drafting checklists, a second opinion before a finding reaches a person, inspection summaries |
+| **Muse Wonder** (`muse-wonder-1.0`) | Drafting checklists, a second opinion before a finding reaches a person, inspection summaries, the scene report overview |
 
-All runtime models are Meta models.
+All runtime models are Meta models. Making outlines follow objects on a playing video uses no model: it is optical flow computed in our own code ([`server/video/motion.ts`](server/video/motion.ts)).
 
 ## Features
 
@@ -87,11 +87,13 @@ All runtime models are Meta models.
 - Framing score (`aligned / slightly_off / far_off`) with retake hints such as *"Turn a little right"*. Items that are new only at the photo's edge are marked *outside the initial frame* instead of flagged
 - A model never closes an issue by itself. Findings it isn't sure about go to a person
 - Re-check any inspection after you change the initial photo, items or checklist
+- **Report** tab on every scene: its whole history in plain words, oldest first (initial photo, each inspection with its problems, decisions and notes), a **✦ Summarise with Muse Wonder** overview on top, and **Copy** to paste it into an email
 
 **Video inspections**
 - A video is sampled at 1 frame per second. Each time it shows a scene, the best frame becomes an inspection for that scene (up to 5 per scene)
 - Start one from a scene, or from a group to cover every scene in it. Scenes the video never showed get a *Not seen* notice
-- **▶ Watch video** plays the recording from the frame that was checked
+- **▶ Watch video** plays the recording with the inspection drawn on it: outlines and labels for watched objects, findings and failed checklist points **follow their objects as the camera moves**, for up to 10 seconds around each checked moment. Dots under the player jump to each checked moment
+- The models look only at the picked frames. The motion between them is measured once per video with classic optical flow (pyramidal Lucas–Kanade on small grayscale frames): no model call and no extra cost
 
 **Operations**
 - Live progress over SSE, and a **Model activity** page with the time and cost of every model call
@@ -178,8 +180,8 @@ Open http://localhost:5173 (the API runs on :8791 behind a proxy). To build the 
 ```
 server/  index.ts (routes)  meta.ts (model calls)  golden.ts (initial photo setup)
          verify.ts  align.ts  checklist.ts (model output → decisions)
-         video/ (frames, frame picking, video inspections)  webhook.ts  workspaces.ts  runlog.ts
-web/     board.tsx  scene.tsx  inspection.tsx  photo.tsx  upload.tsx  api.ts  styles.css
+         video/ (frames, frame picking, motion for outlines on video, video inspections)  webhook.ts  workspaces.ts  runlog.ts
+web/     board.tsx  scene.tsx  inspection.tsx  photo.tsx  track.ts (outlines following the video)  upload.tsx  api.ts  styles.css
 scripts/ seed-demo.ts
 ```
 

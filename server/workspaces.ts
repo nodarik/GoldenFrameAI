@@ -101,7 +101,7 @@ function copyScenes(from: string, to: string) {
   checks.forEach((r) => fresh(r.id as string, "chk"));
   videos.forEach((r) => fresh(r.id as string, "ins"));
 
-  for (const s of scenes) insert("scenes", { ...s, id: id(s.id), workspace_id: to, webhook_url: null, webhook_secret: newSecret(), ingest_token: newSecret(), upload_link_token: null });
+  for (const s of scenes) insert("scenes", { ...s, id: id(s.id), workspace_id: to, webhook_url: null, webhook_secret: newSecret(), ingest_token: newSecret(), upload_link_token: null, digest_hour: null, digest_json: null, digest_every: "day" });
   for (const i of items) insert("items", { ...i, id: id(i.id), scene_id: id(i.scene_id) });
   for (const r of rows("SELECT v.* FROM video_checklists v JOIN scenes s ON s.id = v.scene_id WHERE s.workspace_id = ?", from)) {
     insert("video_checklists", { ...r, scene_id: id(r.scene_id) });

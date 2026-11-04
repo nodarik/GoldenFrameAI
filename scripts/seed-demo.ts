@@ -5,7 +5,7 @@
 //   BASE_URL=https://truescene.fly.dev ACCESS_CODE=… npx tsx scripts/seed-demo.ts
 //   … --reset                                             # delete the demo's current scenes first
 //
-// Each Media/<folder> becomes a scene: main_photo.jpg is the golden photo; objects are detected and a checklist is
+// Each Media/<folder> becomes a scene: main_photo.jpg is the initial photo; objects are detected and a checklist is
 // drafted; every other photo and the video are inspected, so guests have results to review. This calls the models,
 // so it costs a few dollars.
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -59,7 +59,7 @@ async function seedScene(spec: (typeof SCENES)[number]) {
 
   const scene = await postJson<{ id: string }>("/api/scenes", { name: spec.name, group: spec.group });
   await postFile(`/api/scenes/${scene.id}/golden`, "image", join(dir, "main_photo.jpg"), "image/jpeg");
-  log("golden photo set; finding objects…");
+  log("initial photo set; finding objects…");
   const items = await postJson<unknown[]>(`/api/scenes/${scene.id}/items/detect`);
   log(`${items.length} objects watched; drafting the checklist…`);
   const { checklist } = await postJson<{ checklist: unknown[] }>(`/api/scenes/${scene.id}/checklist/draft`);

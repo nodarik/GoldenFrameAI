@@ -1,4 +1,4 @@
-// Tap to make a rule: a tap on the golden photo becomes a named, counted item.
+// Tap to make a rule: a tap on the initial photo becomes a named, counted item.
 import { z } from "zod";
 import { type ItemRow, type SceneRow, db } from "./db.js";
 import { newId, nowIso } from "./ids.js";
@@ -64,7 +64,7 @@ const SAM_PARALLEL = 4;
 // An object this similar to one already watched is the same object found by a different phrase.
 const DUPLICATE_IOU = 0.6;
 
-// Auto-detect on a golden photo: Spark lists the objects worth watching, SAM outlines and counts each kind.
+// Auto-detect on an initial photo: Spark lists the objects worth watching, SAM outlines and counts each kind.
 // Kinds SAM can't find, that cover most of the photo, or that repeat an item already watched are skipped.
 export async function detectItems(scene: SceneRow, golden: Img): Promise<ItemRow[]> {
   const ctx = { sceneId: scene.id };

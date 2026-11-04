@@ -59,13 +59,13 @@ export async function runInspection(id: string) {
 // like photo inspections, so the area row is removed; it stays only to say the scene wasn't seen or failed.
 async function inspectArea(area: AreaRow, frames: string[], sheet: { img: Img; picks: number[] }) {
   const scene = getScene(area.scene_id);
-  if (!scene?.golden_path) return setArea(area, "failed", "This scene has no golden photo.");
+  if (!scene?.golden_path) return setArea(area, "failed", "This scene has no initial photo.");
   try {
     const golden = await load(readFileSync(goldenFile(scene.golden_path)));
     const pick = await json({ sceneId: scene.id }, {
       step: "video.pick", name: PICK_FRAME.name, jsonSchema: PICK_FRAME.jsonSchema, schema: PICK_FRAME.schema, system: PICK_FRAME.system,
       content: [
-        { type: "text", text: "GOLDEN:" }, imagePart(golden),
+        { type: "text", text: "INITIAL:" }, imagePart(golden),
         { type: "text", text: `FRAMES (numbered 1 to ${sheet.picks.length}):` }, imagePart(sheet.img),
       ],
       effort: "low",

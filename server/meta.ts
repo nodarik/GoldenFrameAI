@@ -144,7 +144,7 @@ export const NAME_ITEM = {
   },
 };
 
-// Golden check, step A. Spike lesson: ask explicitly for objects added since GOLDEN.
+// Golden check, step A. Spike lesson: ask explicitly for objects added since INITIAL.
 const BOX_0_1000 = {
   type: "object", additionalProperties: false, required: ["x_min", "y_min", "x_max", "y_max"],
   properties: { x_min: { type: "number" }, y_min: { type: "number" }, x_max: { type: "number" }, y_max: { type: "number" } },
@@ -154,12 +154,12 @@ export const ISSUE_KINDS = ["missing", "moved", "foreign_object", "untidy", "dir
 export const COMPARE = {
   name: "Compare",
   system:
-    "You compare a reference photo (GOLDEN, the correct state) with a NEW photo of the same place.\n" +
+    "You compare a reference photo (INITIAL, the correct state) with a NEW photo of the same place.\n" +
     "1. same_view: false only if NEW clearly shows a different place or an angle too different to compare. view_note: one short sentence.\n" +
-    "framing: same if NEW is framed like GOLDEN, slightly_off if the camera moved, turned or zoomed a little, far_off if much of GOLDEN is cut off or the zoom is very different. " +
+    "framing: same if NEW is framed like INITIAL, slightly_off if the camera moved, turned or zoomed a little, far_off if much of INITIAL is cut off or the zoom is very different. " +
     "framing_hint: if not same, one short instruction for the photographer (e.g. 'Step back and turn a little left'), else empty.\n" +
     "2. issues: differences a hotel or restaurant manager would want fixed: objects missing from NEW, objects moved, " +
-    "objects present in NEW that are NOT in GOLDEN (foreign_object), untidy, dirty or damaged things. " +
+    "objects present in NEW that are NOT in INITIAL (foreign_object), untidy, dirty or damaged things. " +
     "Give each issue a box on NEW using a 0-1000 grid (for a missing object, box the empty spot where it was). " +
     "If an issue is about one of the tagged items listed by the user, set item_id to its id, else null. " +
     "Ignore lighting and small camera shifts. At most 10 issues.\n" +
@@ -187,7 +187,7 @@ export const COMPARE = {
   },
 };
 
-// Auto-detect on a new golden photo (Spark): the objects worth watching. SAM then outlines and counts each.
+// Auto-detect on a new initial photo (Spark): the objects worth watching. SAM then outlines and counts each.
 export const DETECT_ITEMS = {
   name: "DetectItems",
   system:
@@ -210,10 +210,10 @@ export const DETECT_ITEMS = {
 export const SECOND_OPINION = {
   name: "SecondOpinion",
   system:
-    "You are the second reviewer of an automated inspection. GOLDEN shows the correct state of a place; NEW is a later photo. " +
+    "You are the second reviewer of an automated inspection. INITIAL shows the correct state of a place; NEW is a later photo. " +
     "A first model flagged the points listed by the user; each has an id, what was flagged and where on NEW (0-1000 grid). " +
     "For each point: verdict real if NEW clearly shows the problem, not_real if NEW clearly shows it is fine " +
-    "(for example a lighting change, a camera shift, or the object is just outside GOLDEN's frame), unsure otherwise. " +
+    "(for example a lighting change, a camera shift, or the object is just outside INITIAL's frame), unsure otherwise. " +
     "note: one short sentence. Answer every id exactly once. Only report what you can see. Do not describe people.",
   jsonSchema: {
     type: "object", additionalProperties: false, required: ["opinions"],
@@ -229,7 +229,7 @@ export const SECOND_OPINION = {
   },
 };
 
-// Muse Wonder, a starter checklist from the golden photo.
+// Muse Wonder, a starter checklist from the initial photo.
 export const DRAFT_CHECKLIST = {
   name: "DraftChecklist",
   system:
@@ -262,5 +262,21 @@ export const SUMMARY = {
   jsonSchema: {
     type: "object", additionalProperties: false, required: ["summary"],
     properties: { summary: { type: "string" } },
+  },
+};
+
+// Muse Wonder, the overview at the top of a scene's report: the whole history of one scene in a few sentences.
+export const SCENE_REPORT = {
+  name: "SceneReport",
+  system:
+    "You write the overview of a scene's inspection history for a hotel or restaurant manager. The user sends the scene as JSON: " +
+    "when its initial photo (the standard) was set or replaced, and every inspection oldest first, with its date, score, summary, " +
+    "the problems a person confirmed, what is still waiting for a decision, and reviewers' notes. " +
+    "overview: 2 to 5 short sentences. Say how many inspections there were and over what period, what keeps going wrong (name recurring " +
+    "problems), whether things got better or worse, and what is still open now. Use dates like 'Nov 4'. Plain words, no ids, no model names, " +
+    "no scores out of 100. Only state what the JSON shows. Never claim the place is safe, certified or compliant.",
+  jsonSchema: {
+    type: "object", additionalProperties: false, required: ["overview"],
+    properties: { overview: { type: "string" } },
   },
 };

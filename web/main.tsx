@@ -19,14 +19,14 @@ function useHashRoute() {
 
 type Page =
   | { name: "board"; group: string | null }
-  | { name: "scene"; id: string; checkId: string | null }
+  | { name: "scene"; id: string; checkId: string | null; tab: "inspections" | "report" }
   | { name: "legacy-video"; id: string | null }
   | { name: "activity" }
   | { name: "legacy-check"; id: string };
 
 function pageOf(route: string): Page {
   let m: RegExpMatchArray | null;
-  if ((m = route.match(/^\/scenes\/([\w-]+)(?:\/i\/([\w-]+))?$/))) return { name: "scene", id: m[1], checkId: m[2] ?? null };
+  if ((m = route.match(/^\/scenes\/([\w-]+)(?:\/i\/([\w-]+)|\/(report))?$/))) return { name: "scene", id: m[1], checkId: m[2] ?? null, tab: m[3] ? "report" : "inspections" };
   if ((m = route.match(/^\/group\/(.+)$/))) return { name: "board", group: decodeURIComponent(m[1]) };
   if ((m = route.match(/^\/(?:walkthroughs|videos)(?:\/([\w-]+))?$/))) return { name: "legacy-video", id: m[1] && m[1] !== "checklists" ? m[1] : null };
   if ((m = route.match(/^\/checks\/([\w-]+)$/))) return { name: "legacy-check", id: m[1] };
@@ -83,9 +83,9 @@ function Shell({ guest }: { guest: boolean }) {
           <div className="models small muted">Meta SAM 3.1 · Muse Spark · Muse Wonder</div>
         </div>
       </aside>
-      <main className="main">
+      <main className={page.name === "scene" ? "main main-scene" : "main"}>
         {page.name === "board" && <Board scenes={scenes} group={page.group} onChange={loadScenes} />}
-        {page.name === "scene" && <ScenePage id={page.id} checkId={page.checkId} groups={groups} assignees={assignees} onScenesChange={loadScenes} />}
+        {page.name === "scene" && <ScenePage id={page.id} checkId={page.checkId} tab={page.tab} groups={groups} assignees={assignees} onScenesChange={loadScenes} />}
         {page.name === "legacy-video" && <LegacyVideo id={page.id} />}
         {page.name === "activity" && <Activity />}
         {page.name === "legacy-check" && <LegacyCheck id={page.id} />}

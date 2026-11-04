@@ -1,14 +1,16 @@
 // One scene, top to bottom: every inspection (list on the left, the selected
-// inspection's checklist and review on the right), then the written checklist,
-// then the golden photo with everything we watch. Each section collapses.
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+// inspection's checklist and review on the right), then the standard it is checked
+// against: the initial photo with everything we watch on the left, the written
+// checklist on the right. Each section collapses.
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { COLOURS, type CheckSummary, type Integration, type Item, type Rule, type Scene, type VideoNotice, api, ago, getReviewer, plural, post, uploadForm, uploadVideo, useStream } from "./api.js";
 import { DeleteSceneDialog, Dialog, Menu, PersonIcon, SceneDialog } from "./board.js";
 import { InspectionDetail, ReviewPill, SourceIcon } from "./inspection.js";
 import { AnnotatedPhoto } from "./photo.js";
+import { ReportPanel } from "./report.js";
 import QRCode from "qrcode";
 
-export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
+export function ScenePage({ id, checkId, tab = "inspections", groups, assignees = [], onScenesChange }: { id: string; checkId: string | null; tab?: "inspections" | "report"; groups: string[]; assignees?: string[]; onScenesChange: () => void }) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [error, setError] = useState("");
   const [dialog, setDialog] = useState<"edit" | "delete" | "integration" | null>(null);
@@ -38,9 +40,19 @@ export function ScenePage({ id, checkId, groups, assignees = [], onScenesChange 
       </header>
       {error && <div className="banner error" role="alert">{error} <button className="ghost" onClick={() => setError("")}>Dismiss</button></div>}
 
-      {scene.golden && <InspectionsPanel scene={scene} checkId={checkId} onError={setError} />}
-      {scene.golden && <ChecklistPanel scene={scene} onSaved={(checklist) => { setScene({ ...scene, checklist }); onScenesChange(); }} onError={setError} />}
-      <GoldenPanel scene={scene} reload={load} onError={setError} />
+      {scene.golden && (
+        <nav className="scene-tabs" aria-label="Scene views">
+          <a href={`#/scenes/${id}`} className={tab === "inspections" ? "on" : ""} aria-current={tab === "inspections" ? "page" : undefined}>Inspections</a>
+          <a href={`#/scenes/${id}/report`} className={tab === "report" ? "on" : ""} aria-current={tab === "report" ? "page" : undefined}>Report</a>
+        </nav>
+      )}
+      {tab === "report" && scene.golden ? <ReportPanel scene={scene} /> : (
+        <>
+          {scene.golden && <InspectionsPanel scene={scene} checkId={checkId} onError={setError} />}
+          <GoldenPanel scene={scene} reload={load} onError={setError}
+            checklist={<Checklist scene={scene} onSaved={(checklist) => { setScene({ ...scene, checklist }); onScenesChange(); }} onError={setError} />} />
+        </>
+      )}
 
       {dialog === "edit" && (
         <SceneDialog scene={scene} groups={groups} assignees={assignees} onClose={() => setDialog(null)}
@@ -130,6 +142,7 @@ function IntegrationDialog({ sceneId, sceneName, onClose }: { sceneId: string; s
   const [webhookUrl, setWebhookUrl] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [tab, setTab] = useState<"receive" | "send">("receive");
   const show = (i: Integration) => { setInfo(i); setWebhookUrl(i.webhookUrl); };
   useEffect(() => { api<Integration>(`/api/scenes/${sceneId}/integration`).then(show).catch((e) => setError(e.message)); }, [sceneId]);
 
@@ -157,37 +170,123 @@ function IntegrationDialog({ sceneId, sceneName, onClose }: { sceneId: string; s
     <Dialog title="Automation" onClose={onClose} wide>
       {!info ? <p className="muted">{error || "Loading…"}</p> : (
         <div className="form">
-          <h3 className="dialog-section">Upload link for your team</h3>
-          <UploadLinkSection sceneId={sceneId} sceneName={sceneName} info={info} onChange={show} onError={setError} />
-          <h3 className="dialog-section">From other systems</h3>
-          <p className="muted small" style={{ margin: 0 }}>Photos and videos sent to this scene's address are checked like uploads. Use it from Zapier, Make, a script or a phone shortcut; results are posted to your webhook as JSON.</p>
-          <label>Send a photo
-            <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -F image=@photo.jpg ${endpoint}`}</code>
-          </label>
-          <label>Send a video
-            <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -H "Content-Type: video/mp4" --data-binary @video.mp4 "${endpoint}?name=Morning%20round"`}</code>
-            <span className="muted small">Any photo or video can also go as the raw body with its own Content-Type. Up to 15 MB per photo, 200 MB per video.</span>
-          </label>
-          <form onSubmit={save} className="form" style={{ gap: 4 }}>
-            <label htmlFor="webhook-url">Webhook URL</label>
-            <div className="row">
-              <input id="webhook-url" type="url" value={webhookUrl} maxLength={500} placeholder="https://example.com/truescene"
-                onChange={(e) => { setWebhookUrl(e.target.value); setSaved(false); }} style={{ flex: 1 }} />
-              <button className="primary">{saved ? "Saved" : "Save"}</button>
-            </div>
-          </form>
-          <label>Signing secret
-            <code className="copyable">{info.webhookSecret}</code>
-            <span className="muted small">Each delivery carries X-TrueScene-Signature: sha256=HMAC-SHA256 of the body with this secret.</span>
-          </label>
+          <div className="tabs dialog-tabs" role="tablist" aria-label="Automation">
+            <button role="tab" id="auto-tab-receive" aria-controls="auto-panel" aria-selected={tab === "receive"} className={tab === "receive" ? "on" : undefined} onClick={() => setTab("receive")}>↓ Receive photos</button>
+            <button role="tab" id="auto-tab-send" aria-controls="auto-panel" aria-selected={tab === "send"} className={tab === "send" ? "on" : undefined} onClick={() => setTab("send")}>↑ Send results</button>
+          </div>
+          <div id="auto-panel" role="tabpanel" aria-labelledby={`auto-tab-${tab}`} className="form">
+            {tab === "receive" ? (
+              <>
+                <p className="muted small" style={{ margin: 0 }}>Ways to get photos and videos into this scene. Each one is checked like an upload.</p>
+                <h3 className="dialog-section">Upload link for your team</h3>
+                <UploadLinkSection sceneId={sceneId} sceneName={sceneName} info={info} onChange={show} onError={setError} />
+                <h3 className="dialog-section">From other systems</h3>
+                <p className="muted small" style={{ margin: 0 }}>Send to this scene's address from Zapier, Make, a script or a phone shortcut.</p>
+                <label>Send a photo
+                  <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -F image=@photo.jpg ${endpoint}`}</code>
+                </label>
+                <label>Send a video
+                  <code className="copyable">{`curl -H "Authorization: Bearer ${info.token}" -H "Content-Type: video/mp4" --data-binary @video.mp4 "${endpoint}?name=Morning%20round"`}</code>
+                  <span className="muted small">Any photo or video can also go as the raw body with its own Content-Type. Up to 15 MB per photo, 200 MB per video.</span>
+                </label>
+              </>
+            ) : (
+              <>
+                <p className="muted small" style={{ margin: 0 }}>Where this scene's results go. Every finished check and video is posted to your webhook as JSON.</p>
+                <form onSubmit={save} className="form" style={{ gap: 4 }}>
+                  <label htmlFor="webhook-url">Webhook URL</label>
+                  <div className="row">
+                    <input id="webhook-url" type="url" value={webhookUrl} maxLength={500} placeholder="https://example.com/truescene"
+                      onChange={(e) => { setWebhookUrl(e.target.value); setSaved(false); }} style={{ flex: 1 }} />
+                    <button className="primary">{saved ? "Saved" : "Save"}</button>
+                  </div>
+                </form>
+                <label>Signing secret
+                  <code className="copyable">{info.webhookSecret}</code>
+                  <span className="muted small">Each delivery carries X-TrueScene-Signature: sha256=HMAC-SHA256 of the body with this secret.</span>
+                </label>
+                <DigestSection sceneId={sceneId} info={info} onChange={show} onError={setError} />
+              </>
+            )}
+          </div>
           {error && <p className="err" role="alert">{error}</p>}
           <div className="row end">
-            <button className="ghost" onClick={rotate}>New token and secret</button>
+            <button className="ghost" onClick={rotate} title="Makes a new upload token and a new signing secret">New token and secret</button>
             <button onClick={onClose}>Done</button>
           </div>
         </div>
       )}
     </Dialog>
+  );
+}
+
+// The Muse Wonder report overview, posted daily, weekly or monthly as report.summary to the saved webhook.
+// The server keeps the schedule in UTC (weekly = Mondays, monthly = the 1st); labels show it in the viewer's local time,
+// which can fall on the day before or after.
+type Every = Integration["digestEvery"];
+const EVERY_LABEL: Record<Every, string> = { day: "Daily", week: "Weekly", month: "Monthly" };
+const slot = (utcHour: number, utcDay = 1) => new Date(Date.UTC(2024, 0, utcDay, utcHour)); // Jan 1 2024 was a Monday
+const localTime = (utcHour: number) => slot(utcHour).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+
+function scheduleText(every: Every, utcHour: number) {
+  const at = localTime(utcHour), d = slot(utcHour);
+  if (every === "day") return `every day at ${at}`;
+  if (every === "week") return `every ${d.toLocaleDateString(undefined, { weekday: "long" })} at ${at}`;
+  const date = d.getDate(); // local date of the UTC 1st: 1, 2, or 31 (the last day of the month before)
+  return `${date === 1 ? "on the 1st of every month" : date === 2 ? "on the 2nd of every month" : "on the last day of every month"} at ${at}`;
+}
+
+function DigestSection({ sceneId, info, onChange, onError }: { sceneId: string; info: Integration; onChange: (i: Integration) => void; onError: (m: string) => void }) {
+  const [busy, setBusy] = useState<"save" | "send" | null>(null);
+  const [sent, setSent] = useState(false);
+  const run = async (kind: "save" | "send", call: () => Promise<Integration>) => {
+    setBusy(kind);
+    try {
+      onChange(await call());
+      onError("");
+      if (kind === "send") { setSent(true); setTimeout(() => setSent(false), 2000); }
+    } catch (err) {
+      onError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const save = (hour: number | null, every: Every) => void run("save", () =>
+    api<Integration>(`/api/scenes/${sceneId}/integration/digest`, { method: "PUT", body: JSON.stringify({ hour, every }) }));
+  // Turning it on starts at 08:00 local time.
+  const morning = () => { const d = new Date(); d.setHours(8, 0, 0, 0); return d.getUTCHours(); };
+  const setEvery = (value: string) => value === "" ? save(null, info.digestEvery) : save(info.digestHour ?? morning(), value as Every);
+  const sendNow = () => void run("send", () => post<Integration>(`/api/scenes/${sceneId}/integration/digest/send`, {}));
+  const noWebhook = !info.webhookUrl, on = info.digestHour !== null, locked = noWebhook || busy !== null;
+
+  return (
+    <>
+      <h3 className="dialog-section">Report summary</h3>
+      <p className="muted small" style={{ margin: 0 }}>
+        Muse Wonder summarises this scene's report and posts it to your webhook as <code>report.summary</code>, with a ready-to-send <code>text</code> field.
+        Forward it to email or Slack with Zapier or Make.
+      </p>
+      <div className="row">
+        <label htmlFor="digest-every" className="muted small" style={{ whiteSpace: "nowrap" }}>Send</label>
+        <select id="digest-every" value={on ? info.digestEvery : ""} disabled={locked} onChange={(e) => setEvery(e.target.value)}>
+          <option value="">Off</option>
+          {(Object.keys(EVERY_LABEL) as Every[]).map((k) => <option key={k} value={k}>{EVERY_LABEL[k]}</option>)}
+        </select>
+        {on && (
+          <>
+            <label htmlFor="digest-hour" className="muted small">at</label>
+            <select id="digest-hour" value={info.digestHour!} disabled={locked} onChange={(e) => save(Number(e.target.value), info.digestEvery)}>
+              {Array.from({ length: 24 }, (_, h) => <option key={h} value={h}>{localTime(h)}</option>)}
+            </select>
+          </>
+        )}
+        <button type="button" onClick={sendNow} disabled={locked}>{busy === "send" ? "Sending…" : sent ? "Sent ✓" : "✦ Send now"}</button>
+      </div>
+      <span className="muted small">
+        {noWebhook ? "Save a webhook URL above to turn this on."
+          : `${on ? `Goes out ${scheduleText(info.digestEvery, info.digestHour!)}, skipped when there are no new inspections. ` : ""}${info.digestSentAt ? `Last sent ${ago(info.digestSentAt)}.` : "Not sent yet."}`}
+      </span>
+    </>
   );
 }
 
@@ -201,8 +300,8 @@ function CollapseButton({ collapsed, onToggle, label }: { collapsed: boolean; on
   );
 }
 
-// ---------- golden photo + what we watch ----------
-function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => Promise<unknown>; onError: (m: string) => void }) {
+// ---------- initial photo + what we watch, with the checklist beside it ----------
+function GoldenPanel({ scene, reload, onError, checklist }: { scene: Scene; reload: () => Promise<unknown>; onError: (m: string) => void; checklist: ReactNode }) {
   const [busy, setBusy] = useState<"upload" | "detect" | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const [pending, setPending] = useState<{ x: number; y: number } | null>(null);
@@ -248,7 +347,7 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
   };
 
   const replace = () => {
-    if (scene.items.length && !confirm("A new golden photo clears what we watch (positions change) and finds objects again. Continue?")) return;
+    if (scene.items.length && !confirm("A new initial photo clears what we watch (positions change) and finds objects again. Continue?")) return;
     fileRef.current?.click();
   };
 
@@ -296,11 +395,11 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
     return (
       <section className="panel drop">
         {input}
-        <h2>Add the golden photo</h2>
+        <h2>Add the initial photo</h2>
         <p className="muted">Photograph the scene when it looks exactly right, from the spot every inspection will use. TrueScene then finds the objects in it.</p>
         <button className="primary" onClick={() => fileRef.current?.click()} disabled={!!busy}>{label}</button>
         {busy === "upload" && progress !== null && (
-          <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Uploading golden photo"
+          <div className="bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={progress} aria-label="Uploading initial photo"
             style={{ maxWidth: 320, margin: "12px auto 0" }}>
             <div style={{ width: `${progress}%` }} />
           </div>
@@ -315,7 +414,7 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
     id: item.id, label: item.name, sub: `×${item.expectedCount} · looks like "${item.phrase}"`, colour: colour(i),
     boxes: item.boxes, masks: item.masks ?? (item.mask ? [item.mask] : []),
   }));
-  const status = busy === "upload" ? `Uploading the golden photo… ${progress ?? 0}%`
+  const status = busy === "upload" ? `Uploading the initial photo… ${progress ?? 0}%`
     : busy === "detect" ? "Finding objects: Spark lists them, SAM outlines and counts each…"
     : pending ? "Outlining that object, naming it and counting matches…" : null;
 
@@ -323,29 +422,34 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
     <section className={`panel golden${collapsed ? " collapsed" : ""}`}>
       {input}
       <div className="panel-head">
-        <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Golden photo" />
+        <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Initial photo and checklist" />
         <div style={{ flex: 1 }}>
-          <h2>Golden photo</h2>
-          <p className="muted">How the scene must look. Hover an object to see what we watch, click one to edit it and drag its box; click empty space to add an object.</p>
+          <h2>Initial photo &amp; checklist</h2>
+          <p className="muted">The standard every inspection is checked against: the objects SAM counts on the photo, and the rules Spark checks.</p>
         </div>
+      </div>
+      {!collapsed && (
+      <div className="setup-body">
+      <div className="setup-photo">
+      <div className="setup-head">
+        <h3>Initial photo</h3>
         <div className="row">
           <button onClick={detect} disabled={!!busy || !!pending}>Find objects</button>
           <button onClick={replace} disabled={!!busy}>Replace photo</button>
         </div>
       </div>
-      {!collapsed && (
-      <>
+      <p className="muted small">Hover an object to see what we watch, click one to edit it and drag its box; click empty space to add an object.</p>
       {status && (
         <div className="banner info" role={busy === "upload" ? "progressbar" : undefined}
           aria-valuemin={busy === "upload" ? 0 : undefined} aria-valuemax={busy === "upload" ? 100 : undefined}
-          aria-valuenow={busy === "upload" ? (progress ?? 0) : undefined} aria-label={busy === "upload" ? "Uploading golden photo" : undefined}>
+          aria-valuenow={busy === "upload" ? (progress ?? 0) : undefined} aria-label={busy === "upload" ? "Uploading initial photo" : undefined}>
           <span className="spinner" /> <span>{status}</span>
           {busy === "upload" && progress !== null && (
             <span className="bar" style={{ flex: 1, minWidth: 120, marginTop: 0 }}><div style={{ width: `${progress}%` }} /></span>
           )}
         </div>
       )}
-      <AnnotatedPhoto media={g} label="Golden photo" shapes={shapes} active={active} onActive={setActive} busyAt={pending}
+      <AnnotatedPhoto media={g} label="Initial photo" shapes={shapes} active={active} onActive={setActive} busyAt={pending}
         onPick={(itemId) => setOpen(itemId)} onEmptyClick={tap} editable={open}
         onBoxChange={async (itemId, boxes) => { const item = scene.items.find((i) => i.id === itemId); if (item) await update(item, { boxes }); }}
         onBoxDelete={(itemId, index) => { const item = scene.items.find((i) => i.id === itemId); if (item) void removeBox(item, index); }} />
@@ -364,7 +468,9 @@ function GoldenPanel({ scene, reload, onError }: { scene: Scene; reload: () => P
           ))}
         </div>
       </div>
-      </>
+      </div>
+      <div className="setup-side">{checklist}</div>
+      </div>
       )}
     </section>
   );
@@ -414,14 +520,14 @@ function ItemRow({ item, colour, lit, open, onToggle, onHover, onSave, onDelete 
 // ---------- checklist ----------
 const NEW_SECTION = "__new";
 
-function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (rules: Rule[]) => void; onError: (m: string) => void }) {
+// Shown beside the initial photo, inside its panel.
+function Checklist({ scene, onSaved, onError }: { scene: Scene; onSaved: (rules: Rule[]) => void; onError: (m: string) => void }) {
   const rules = scene.checklist;
   const sections = [...new Set(rules.map((r) => r.section))];
   const [draft, setDraft] = useState("");
   const [section, setSection] = useState(sections[0] ?? NEW_SECTION);
   const [newSection, setNewSection] = useState("");
   const [drafting, setDrafting] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const [closed, setClosed] = useState<Set<string>>(() => new Set());
   const toggle = (name: string) =>
     setClosed((prev) => {
@@ -473,18 +579,13 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
   };
 
   return (
-    <section className={`panel${collapsed ? " collapsed" : ""}`}>
-      <div className="panel-head">
-        <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Checklist" />
-        <div style={{ flex: 1 }}>
-          <h2>Checklist</h2>
-          <p className="muted">What must be true, beyond the watched objects. Spark checks every rule on every inspection.</p>
-        </div>
+    <>
+      <div className="setup-head">
+        <h3>Checklist <span className="count">{rules.length}</span></h3>
         <button onClick={wonder} disabled={drafting}>{drafting ? "Muse Wonder is writing…" : "✦ Draft with Muse Wonder"}</button>
       </div>
-      {!collapsed && (
-      <>
-      {rules.length === 0 && <p className="muted small">No rules yet. Draft a starter checklist from the golden photo, or write your own below.</p>}
+      <p className="muted small">What must be true, beyond the watched objects. Spark checks every rule on every inspection.</p>
+      {rules.length === 0 && <p className="muted small">No rules yet. Draft a starter checklist from the initial photo, or write your own below.</p>}
       {sections.length > 1 && (
         <div className="row end" style={{ margin: "0 0 8px" }}>
           <button type="button" className="link small" onClick={() => setClosed(new Set())}>Expand all</button>
@@ -521,9 +622,7 @@ function ChecklistPanel({ scene, onSaved, onError }: { scene: Scene; onSaved: (r
         )}
         <button className="primary" disabled={rules.length >= 40}>Add rule</button>
       </form>
-      </>
-      )}
-    </section>
+    </>
   );
 }
 
@@ -532,7 +631,9 @@ function RuleEditor({ rule, onSave, onDelete }: { rule: Rule; onSave: (text: str
   useEffect(() => setText(rule.text), [rule.text]);
   return (
     <div className="rule-edit">
-      <input type="text" value={text} maxLength={200} aria-label="Rule" onChange={(e) => setText(e.target.value)}
+      {/* Wraps and grows with the text, so long rules stay readable in the narrow column. Enter saves. */}
+      <textarea rows={1} value={text} maxLength={200} aria-label="Rule" onChange={(e) => setText(e.target.value.replace(/\n/g, " "))}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); e.currentTarget.blur(); } }}
         onBlur={() => text.trim() && text !== rule.text && onSave(text)} />
       <button type="button" className="icon" onClick={onDelete} aria-label={`Delete rule: ${rule.text}`}>✕</button>
     </div>
@@ -585,7 +686,7 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
     const done = (checks ?? []).filter((c) => c.status !== "running" && c.costUsd > 0);
     const each = done.length ? done.reduce((n, c) => n + c.costUsd, 0) / done.length : 0;
     const reviewed = outdated.filter((c) => c.reviewStatus === "reviewed").length;
-    if (!confirm(`Check ${plural(outdated.length, "inspection")} again with the current golden photo, items and checklist?` +
+    if (!confirm(`Check ${plural(outdated.length, "inspection")} again with the current initial photo, items and checklist?` +
       (each ? ` About $${(each * outdated.length).toFixed(2)}.` : "") +
       (reviewed ? ` ${reviewed} reviewed will need review again; their current results stay in the history.` : ""))) return;
     setRechecking(true);
@@ -636,7 +737,7 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
         <CollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} label="Inspections" />
         <div style={{ flex: 1 }}>
           <h2>Inspections</h2>
-          <p className="muted">Every photo and video frame checked against the golden photo. A person marks each one reviewed.</p>
+          <p className="muted">Every photo and video frame checked against the initial photo. A person marks each one reviewed.</p>
         </div>
         <div className="row">
           {outdated.length > 0 && <button onClick={recheckOutdated} disabled={rechecking}>{rechecking ? "Starting…" : `Re-check ${outdated.length} outdated`}</button>}
@@ -647,7 +748,7 @@ function InspectionsPanel({ scene, checkId, onError }: { scene: Scene; checkId: 
       <VideoNotices sceneId={scene.id} onError={onError} />
       {checks && checks.length === 0 ? (
         <div className="empty small">
-          <p className="muted">No inspections yet. Stand where the golden photo was taken and take a photo or a short video.</p>
+          <p className="muted">No inspections yet. Stand where the initial photo was taken and take a photo or a short video.</p>
         </div>
       ) : (
         <div className="split">

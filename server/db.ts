@@ -80,8 +80,8 @@ CREATE INDEX IF NOT EXISTS items_scene ON items(scene_id);
 CREATE INDEX IF NOT EXISTS runs_scene ON runs(scene_id, id);
 `);
 
-// Each check keeps the golden photo it was compared with, so replacing the golden photo leaves old checks intact.
-// Older databases lack these columns: add them and fill in the scene's current golden photo.
+// Each check keeps the initial photo it was compared with, so replacing the initial photo leaves old checks intact.
+// Older databases lack these columns: add them and fill in the scene's current initial photo.
 const checkCols = (db.prepare("PRAGMA table_info(checks)").all() as { name: string }[]).map((c) => c.name);
 if (!checkCols.includes("golden_path")) {
   db.exec(`
@@ -101,7 +101,7 @@ export const addColumn = (table: string, column: string, type: string) => {
 addColumn("scenes", "group_name", "TEXT");
 addColumn("scenes", "assignee", "TEXT");
 addColumn("items", "masks_json", "TEXT");
-// Spots on the golden photo where a person deleted one of an item's boxes: matches there aren't counted.
+// Spots on the initial photo where a person deleted one of an item's boxes: matches there aren't counted.
 addColumn("items", "ignored_json", "TEXT");
 if (!columnsOf("checks").includes("review_status")) {
   db.exec(`
@@ -120,7 +120,7 @@ CREATE INDEX IF NOT EXISTS check_reviews_check ON check_reviews(check_id, id);
 // What a check said before it was checked again, kept with that history entry.
 addColumn("check_reviews", "result_json", "TEXT");
 
-// Setup version: goes up whenever what a check compares against changes (golden photo, watched items; the checklist's
+// Setup version: goes up whenever what a check compares against changes (initial photo, watched items; the checklist's
 // trigger is in checklist.ts). Each check records the version it ran against, so an older one can say it's outdated.
 // Triggers, so no route can forget it. Renaming an item doesn't change any result, so it doesn't count.
 addColumn("scenes", "setup_version", "INT NOT NULL DEFAULT 0");
@@ -141,14 +141,26 @@ CREATE TRIGGER IF NOT EXISTS setup_item_changed AFTER UPDATE ON items
 addColumn("scenes", "workspace_id", "TEXT NOT NULL DEFAULT 'demo'");
 // A scene's upload link (/u/<token>) for people without an account; NULL while it's turned off. And who sent each photo.
 addColumn("scenes", "upload_link_token", "TEXT");
+// Muse Wonder's last overview of the scene's report: { overview, at, inspections, lastAt } (see /api/scenes/:id/report).
+addColumn("scenes", "report_json", "TEXT");
+// Report summary by webhook: how often it goes out (day, week = Mondays, month = the 1st), the UTC hour (NULL = off),
+// and what the last one covered: { sentAt, inspections, lastAt }, so a period without new inspections sends nothing.
+addColumn("scenes", "digest_hour", "INT");
+addColumn("scenes", "digest_json", "TEXT");
+addColumn("scenes", "digest_every", "TEXT NOT NULL DEFAULT 'day'");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS scenes_upload_link ON scenes (upload_link_token)");
 addColumn("snapshots", "uploaded_by", "TEXT");
+
+export const DIGEST_EVERY = ["day", "week", "month"] as const;
+export type DigestEvery = (typeof DIGEST_EVERY)[number];
 
 export type SceneRow = {
   id: string; name: string; workspace_id: string; type: "golden" | "monitor"; group_name: string | null; assignee: string | null;
   golden_path: string | null; golden_w: number | null; golden_h: number | null;
   webhook_url: string | null; webhook_secret: string; ingest_token: string; upload_link_token: string | null;
   rules_json: string; created_at: string; setup_version: number;
+  report_json: string | null;
+  digest_hour: number | null; digest_json: string | null; digest_every: DigestEvery;
 };
 
 export type ItemRow = {

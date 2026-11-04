@@ -12,7 +12,7 @@ export type Finding = {
   id: string; kind: FindingKind; text: string; itemId: string | null;
   boxes: Box[]; goldenBoxes: Box[]; mask: MaskOutline | null;
   source: "sam" | "spark" | "both"; status: FindingStatus; why: string;
-  // Set when the box shows something outside the golden photo's view: not compared, so not an issue.
+  // Set when the box shows something outside the initial photo's view: not compared, so not an issue.
   outsideFrame?: boolean;
   secondOpinion?: SecondOpinion;
 };
@@ -20,15 +20,15 @@ export type Finding = {
 // Muse Wonder's verdict on a point left for a person (see golden.ts).
 export type SecondOpinion = { verdict: "real" | "not_real" | "unsure"; note: string };
 
-// How the new photo relates to the golden one (align.ts): map new boxes into golden coordinates,
-// and tell whether a new box lies outside what the golden photo shows.
+// How the new photo relates to the initial one (align.ts): map new boxes into initial-photo coordinates,
+// and tell whether a new box lies outside what the initial photo shows.
 export type Framing = { toGolden: (b: Box) => Box; outside: (b: Box) => boolean };
 export const SAME_FRAMING: Framing = { toGolden: (b) => b, outside: () => false };
 
 export type ItemResult = {
   itemId: string; name: string; expected: number; found: number;
   goldenBoxes: Box[]; boxes: Box[]; positionMatters: boolean; ok: boolean;
-  // Matches left out of the count because they're outside the golden photo's view.
+  // Matches left out of the count because they're outside the initial photo's view.
   outsideFrame: number;
 };
 
@@ -74,7 +74,7 @@ export const matchPairs = (golden: Box[], found: Box[]) =>
 
 export const furthestMove = (golden: Box[], found: Box[]) => Math.max(0, ...match(golden, found).matched.map((p) => p.d));
 
-// Drop matches that sit on an ignored spot (golden photo coordinates), e.g. the third of three pillows nobody watches.
+// Drop matches that sit on an ignored spot (initial photo coordinates), e.g. the third of three pillows nobody watches.
 export const notIgnored = (boxes: Box[], ignored: Box[], toGolden = SAME_FRAMING.toGolden) =>
   ignored.length ? boxes.filter((b) => !ignored.some((x) => iou(toGolden(b), x) > IGNORED_IOU)) : boxes;
 
@@ -141,11 +141,11 @@ export function verify(items: ItemResult[], issues: SparkIssue[], newId: () => s
     const text = neutral(s.text);
     if (!hasArea(box) || !text) return; // no evidence or nothing to say: drop
     const common = { id: newId(), text, itemId: s.itemId, boxes: [box], goldenBoxes: [], mask: s.mask, source: "spark" as const };
-    // Something at the edge of a differently framed photo was never in the golden photo: nothing to compare it with.
+    // Something at the edge of a differently framed photo was never in the initial photo: nothing to compare it with.
     if (s.kind !== "missing" && framing.outside(box)) {
       findings.push({
         ...common, kind: s.kind === "moved" ? "item_moved" : s.kind, status: "rejected", outsideFrame: true,
-        why: "Outside the golden photo's view, so it can't be compared. Retake the photo framed like the golden one to check it.",
+        why: "Outside the initial photo's view, so it can't be compared. Retake the photo framed like the initial one to check it.",
       });
       return;
     }

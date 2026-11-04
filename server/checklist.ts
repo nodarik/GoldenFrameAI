@@ -61,7 +61,7 @@ const Box1000 = z.object({ x_min: z.number(), y_min: z.number(), x_max: z.number
 const CHECKLIST = {
   name: "Checklist",
   system:
-    "You check a NEW photo of a place against a written checklist. GOLDEN shows the correct state, for reference only.\n" +
+    "You check a NEW photo of a place against a written checklist. INITIAL shows the correct state, for reference only.\n" +
     "For each rule: verdict pass if NEW clearly shows the rule is met, fail if NEW clearly shows it is not, " +
     "unclear if NEW doesn't show enough to tell. note: one short sentence on what you see. " +
     "box: where on NEW the evidence is, on a 0-1000 grid; all zeros if there is no single spot.\n" +
@@ -105,7 +105,7 @@ export async function checkRules(sceneId: string, checkId: string, golden: Img, 
         step: "check.checklist", name: CHECKLIST.name, jsonSchema: CHECKLIST.jsonSchema, schema: CHECKLIST.schema, system: CHECKLIST.system,
         content: [
           { type: "text", text: `Checklist (rule_id: rule):\n${batch.map((r) => `${r.id}: ${r.text}`).join("\n")}` },
-          { type: "text", text: "GOLDEN:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(photo),
+          { type: "text", text: "INITIAL:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(photo),
         ],
       })).results;
     } catch (e) {

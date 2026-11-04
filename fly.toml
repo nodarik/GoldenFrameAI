@@ -7,7 +7,7 @@ primary_region = "fra"
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 1  # stay warm for judges; no cold start
 
   [[http_service.checks]]
     grace_period = "10s"
@@ -19,3 +19,8 @@ primary_region = "fra"
 [mounts]
   source = "gf_data"
   destination = "/data"
+
+# 256 MB ran out of memory (sharp + ffmpeg + node) and froze the app.
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

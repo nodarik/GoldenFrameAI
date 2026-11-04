@@ -20,7 +20,7 @@ export function Board({ scenes, group, onChange }: { scenes: SceneSummary[] | nu
             <h1>{group ?? "All scenes"}</h1>
             <span className="live">Live</span>
           </div>
-          <p className="muted">Every scene's golden photo, its latest inspection and what a person has to do next.</p>
+          <p className="muted">Every scene's initial photo, its latest inspection and what a person has to do next.</p>
         </div>
         <div className="head-stats">
           <div><b>{byColumn.get("review")!.length}</b><span>To review</span></div>
@@ -79,7 +79,7 @@ function typeLine(n: number, kind: "photo" | "video", toReview: number): CardLin
 }
 
 function cardNote(s: SceneSummary): CardLine {
-  if (!s.golden) return { text: "Add a golden photo" };
+  if (!s.golden) return { text: "Add an initial photo" };
   if (s.itemCount === 0 && s.ruleCount === 0) return { text: "Mark what to watch" };
   const total = s.checkCount ?? 0;
   const l = s.lastCheck;
@@ -179,7 +179,7 @@ function GroupVideoButton({ sceneIds, onError, onStarted }: { sceneIds: string[]
     <>
       <input ref={ref} type="file" accept="video/*" hidden onChange={(e) => send(e.target.files?.[0])} />
       <button onClick={() => ref.current?.click()} disabled={!sceneIds.length}
-        title={sceneIds.length ? `Film the ${plural(sceneIds.length, "scene")} of this group in one video (up to 3 min)` : "Add a golden photo to a scene first"}>
+        title={sceneIds.length ? `Film the ${plural(sceneIds.length, "scene")} of this group in one video (up to 3 min)` : "Add an initial photo to a scene first"}>
         + Video inspection
       </button>
     </>
@@ -318,7 +318,7 @@ export function DeleteSceneDialog({ scene, onClose, onDeleted }: { scene: { id: 
   };
   return (
     <Dialog title={`Delete "${scene.name}"?`} onClose={onClose}>
-      <p className="muted">This deletes the golden photo, watched items, checklist and every inspection photo of this scene. It can't be undone.</p>
+      <p className="muted">This deletes the initial photo, watched items, checklist and every inspection photo of this scene. It can't be undone.</p>
       {error && <p className="err" role="alert">{error}</p>}
       <div className="row end">
         <button className="ghost" onClick={onClose} autoFocus>Cancel</button>

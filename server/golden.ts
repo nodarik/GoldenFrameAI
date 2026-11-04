@@ -1,4 +1,4 @@
-// Golden check: compare a new photo with the scene's golden photo.
+// Golden check: compare a new photo with the scene's initial photo.
 // A: Spark compares both photos (view guard, framing, issues); SAM counts every tagged item; Spark runs the written checklist.
 // B: framing from SAM anchors (align.ts). C: evidence masks for Spark issues. D: verify.ts decides.
 // E: Muse Wonder gives a second opinion on what's left for a person, and writes the summary. F: save, score, events.
@@ -68,7 +68,7 @@ async function compareWithGolden(scene: SceneRow, checkId: string, golden: Img, 
     const [compare, counts, checklist] = await Promise.all([
       json(ctx, {
         step: "check.compare", name: COMPARE.name, jsonSchema: COMPARE.jsonSchema, schema: Compare, system: COMPARE.system,
-        content: [{ type: "text", text: tagged }, { type: "text", text: "GOLDEN:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(snap)],
+        content: [{ type: "text", text: tagged }, { type: "text", text: "INITIAL:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(snap)],
       }),
       mapLimit(items, SAM_PARALLEL, (item) => sam(ctx, `check.count · ${item.name}`, snap, item.phrase)),
       checkRules(scene.id, checkId, golden, snap),
@@ -128,9 +128,9 @@ async function secondOpinion(ctx: { sceneId: string; checkId: string }, golden: 
   const rules = (result.checklist ?? []).filter((r) => r.status === "needs_review");
   if (!findings.length && !rules.length) return;
   const points = [
-    // A missing item's box is where it is on GOLDEN; look around the same spot on NEW.
+    // A missing item's box is where it is on INITIAL; look around the same spot on NEW.
     ...findings.map((f) => f.kind === "item_missing"
-      ? `${f.id}: finding (item missing): ${f.text}. It was${at(f.goldenBoxes[0])} on GOLDEN; check whether it is still there on NEW`
+      ? `${f.id}: finding (item missing): ${f.text}. It was${at(f.goldenBoxes[0])} on INITIAL; check whether it is still there on NEW`
       : `${f.id}: finding (${f.kind.replace("_", " ")}): ${f.text}${at(f.boxes[0])}`),
     ...rules.map((r) => `${r.ruleId}: checklist rule should be true: "${r.text}". First model: ${r.note}${at(r.box)}`),
   ];
@@ -138,7 +138,7 @@ async function secondOpinion(ctx: { sceneId: string; checkId: string }, golden: 
     const out = await json(ctx, {
       step: "check.second_opinion", model: env.WONDER_MODEL, name: SECOND_OPINION.name, jsonSchema: SECOND_OPINION.jsonSchema, schema: Opinions,
       system: SECOND_OPINION.system,
-      content: [{ type: "text", text: `Points:\n${points.join("\n")}` }, { type: "text", text: "GOLDEN:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(snap)],
+      content: [{ type: "text", text: `Points:\n${points.join("\n")}` }, { type: "text", text: "INITIAL:" }, imagePart(golden), { type: "text", text: "NEW:" }, imagePart(snap)],
     });
     const byId = new Map(out.opinions.map((o) => [o.id, { verdict: o.verdict, note: o.note }]));
     for (const f of findings) {
@@ -188,7 +188,7 @@ function finish(checkId: string, sceneId: string, result: CheckResult, forced?: 
   db.prepare("UPDATE checks SET status = ?, score_ok = ?, score_total = ?, result_json = ?, cost_usd = ?, review_status = ?, reviewed_at = ? WHERE id = ?")
     .run(status, ok, result.items.length + rules.length, JSON.stringify(result), cost, reviewed ? "reviewed" : "needs_review", reviewed ? nowIso() : null, checkId);
   db.prepare("UPDATE snapshots SET status = 'done' WHERE id = (SELECT snapshot_id FROM checks WHERE id = ?)").run(checkId);
-  if (reviewed) addHistory(checkId, "auto_reviewed", "Everything matched the golden photo and checklist.", "TrueScene");
+  if (reviewed) addHistory(checkId, "auto_reviewed", "Everything matched the initial photo and checklist.", "TrueScene");
 
   if (status === "retake") emitEvent(sceneId, checkId, "retake_needed", { viewNote: result.viewNote, alignment: result.alignment ?? null });
   for (const f of result.findings) if (f.status === "confirmed") emitFinding(sceneId, checkId, f);

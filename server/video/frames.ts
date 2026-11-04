@@ -5,7 +5,7 @@ import { join } from "node:path";
 import sharp from "sharp";
 import type { Img } from "../images.js";
 
-const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
+export const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
 export const MAX_SECONDS = 180;
 const MAX_SIDE = 1600;
 const TILE_W = 240, COLS = 8, MAX_TILES = 48, GAP = 4;

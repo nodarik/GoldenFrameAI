@@ -21,7 +21,7 @@ export type SceneSummary = {
   photoCount: number; videoCount: number; photoToReview: number; videoToReview: number;
 };
 export type Scene = { id: string; name: string; group: string; assignee: string; golden: Media | null; items: Item[]; checklist: Rule[] };
-export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string; uploadLinkPath: string | null };
+export type Integration = { ingestPath: string; token: string; webhookUrl: string; webhookSecret: string; uploadLinkPath: string | null; digestHour: number | null; digestEvery: "day" | "week" | "month"; digestSentAt: string | null };
 
 export type SecondOpinion = { verdict: "real" | "not_real" | "unsure"; note: string };
 export type Finding = {
@@ -47,10 +47,10 @@ export type CheckSummary = {
   id: string; sceneId: string; status: CheckStatus; createdAt: string; takenAt: string; costUsd: number;
   reviewStatus: ReviewStatus; reviewedAt: string | null; issues: number; flags: number; source: Source;
   uploadedBy: string | null; // the name someone gave on an upload link (or `?by=` on the API)
-  // The golden photo, watched items or checklist changed after this check ran: re-check to include the changes.
+  // The initial photo, watched items or checklist changed after this check ran: re-check to include the changes.
   outdated: boolean;
   score: { ok: number; total: number } | null; snapshot: Media;
-  // The golden photo this check was compared with (the scene's may have been replaced since).
+  // The initial photo this check was compared with (the scene's may have been replaced since).
   golden: Media;
 };
 export type Check = CheckSummary & {
@@ -132,6 +132,10 @@ export type Video = {
   createdAt: string; durationMs: number | null; scenes: VideoScene[];
 };
 
+// How the picture moves through a video (server/video/motion.ts): flow[k] is the move of each grid cell from frame k
+// to k + 1, dx and dy in tenths of a pixel of a w × h frame, or null twice where it couldn't be measured.
+export type Motion = { fps: number; w: number; h: number; cell: number; cols: number; rows: number; flow: (number | null)[][] };
+
 // One shared connection to the server's live updates (run, check, event, inspection).
 let stream: EventSource | null = null;
 export function useStream<T>(type: string, on: (data: T) => void) {
@@ -171,7 +175,7 @@ export const setReviewer = (name: string) => { try { localStorage.setItem(REVIEW
 // Board columns: what a manager has to do next for each scene.
 export type Column = "setup" | "ready" | "review" | "issues" | "reviewed";
 export const COLUMNS: { id: Column; title: string; hint: string }[] = [
-  { id: "setup", title: "Not set up", hint: "Needs a golden photo and something to watch or a checklist" },
+  { id: "setup", title: "Not set up", hint: "Needs an initial photo and something to watch or a checklist" },
   { id: "ready", title: "Ready", hint: "Set up, no inspection yet" },
   { id: "review", title: "Needs review", hint: "An inspection waits for a person" },
   { id: "issues", title: "Issues", hint: "Reviewed, and a person confirmed something needs fixing" },
