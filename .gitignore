@@ -20,3 +20,6 @@ spike/out/
 # demo source media and private notes
 Media/
 docs/demo-video-script.md
+
+# local Claude Code config
+.claude/
